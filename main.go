@@ -38,7 +38,7 @@ func main() {
 		// 1. ОБРАБОТКА CALLBACK QUERY (НАЖАТИЕ INLINE-КНОПКИ)
 		if update.CallbackQuery != nil {
 			callback := update.CallbackQuery
-
+			log.Printf("Получен Callback от [%s]: %s", callback.From.UserName, callback.Data)
 			// Отправляем ответ на запрос (убирает "часики" с кнопки)
 			callbackConfig := tgbotapi.NewCallback(callback.ID, "")
 			if _, err := bot.Request(callbackConfig); err != nil {
@@ -62,7 +62,7 @@ func main() {
 
 		// 2. ОБРАБОТКА ОБЫЧНЫХ СООБЩЕНИЙ (ТЕКСТ/КОМАНДЫ)
 		if update.Message != nil {
-
+			log.Printf("[%s] %s", update.Message.From.UserName, update.Message.Text)
 			// Если это команда
 			if update.Message.IsCommand() {
 				msg := tgbotapi.NewMessage(update.Message.Chat.ID, "")
