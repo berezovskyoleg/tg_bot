@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"golang.org/x/oauth2/google"
@@ -260,16 +261,27 @@ func sendQuestion(bot *tgbotapi.BotAPI, service *sheets.Service, chatID int64, u
 		// --- ТЕСТ ЗАВЕРШЕН ---
 		currentScore := userScores[userID]
 		totalQuestions := len(currentTest)
+		username := fmt.Sprintf("@%s", bot.Self.UserName) // Используем юзернейм для записи
 
+		// 1. Запись результата в Sheets
+		err := writeResultToSheets(service, userID, username, currentScore, totalQuestions)
+		if err != nil {
+			log.Println("Ошибка записи результата:", err)
+		}
+
+		// 2. Формирование финального сообщения
 		finalText := fmt.Sprintf("Тест завершен!\nВаш результат: %d из %d.", currentScore, totalQuestions)
+
+		// Проверяем, удалось ли найти и записать/обновить результат
+		if err == nil {
+			// (Здесь можно добавить логику отображения, если результат был улучшен)
+			finalText += "\nРезультат сохранен и обновлен."
+		}
+
 		finalMsg := tgbotapi.NewMessage(chatID, finalText)
 		bot.Send(finalMsg)
 
-		// Запись результата в Sheets (логика записи пока не реализована, просто заглушка)
-		// ВАЖНО: Здесь должна быть логика проверки и перезаписи лучшего результата!
-		// writeResultToSheets(service, userID, currentScore, totalQuestions)
-
-		// Очистка состояния
+		// 3. Очистка состояния
 		delete(userState, userID)
 		delete(userScores, userID)
 		return
@@ -291,4 +303,93 @@ func sendQuestion(bot *tgbotapi.BotAPI, service *sheets.Service, chatID int64, u
 	if _, err := bot.Send(msg); err != nil {
 		log.Println("Ошибка отправки вопроса:", err)
 	}
+}
+
+// writeResultToSheets ищет предыдущий результат пользователя и перезаписывает, если текущий лучше
+func writeResultToSheets(service *sheets.Service, userID int64, username string, currentScore int, totalQuestions int) error {
+	ctx := context.Background()
+
+	// 1. Читаем все существующие результаты, чтобы найти предыдущий
+	readRange := "Results1!A:D" // A: UserID, B: Username, C: Score, D: Timestamp
+	resp, err := service.Spreadsheets.Values.Get(spreadsheetID, readRange).Do()
+	if err != nil {
+		return fmt.Errorf("ошибка чтения результатов: %w", err)
+	}
+
+	var updateRange string
+	var previousBestScore int
+
+	// Ищем строку, принадлежащую текущему пользователю
+	for i, row := range resp.Values {
+		// Пропускаем заголовок
+		if i == 0 {
+			continue
+		}
+
+		// Ожидаем, что UserID находится в первой колонке (row[0])
+		if len(row) > 0 && row[0] == fmt.Sprintf("%d", userID) {
+			// Строка найдена. Проверяем предыдущий балл.
+			if len(row) > 2 {
+				// Пытаемся распарсить предыдущий балл (например, "5/10")
+				scoreParts := strings.Split(row[2].(string), "/")
+				if len(scoreParts) == 2 {
+					if score, err := strconv.Atoi(scoreParts[0]); err == nil {
+						previousBestScore = score
+					}
+				}
+			}
+
+			// Если текущий результат не лучше предыдущего, не записываем
+			if currentScore <= previousBestScore {
+				log.Printf("Результат пользователя %d (%d) не лучше предыдущего (%d). Пропуск записи.", userID, currentScore, previousBestScore)
+				return nil // Выходим без записи
+			}
+
+			// Если результат лучше, запоминаем диапазон для ОБНОВЛЕНИЯ (i+1, т.к. Sheets использует 1-based indexing)
+			updateRange = fmt.Sprintf("Results1!A%d", i+1)
+			break
+		}
+	}
+
+	// 2. Если updateRange найден (результат лучше или это не первая запись)
+	//    ИЛИ если это совершенно новый пользователь (updateRange пуст), записываем/обновляем.
+
+	newScoreText := fmt.Sprintf("%d/%d", currentScore, totalQuestions)
+	currentTime := time.Now().Format("2006-01-02 15:04:05")
+
+	// Новая строка для записи
+	row := []interface{}{
+		userID,
+		username,
+		newScoreText,
+		currentTime,
+	}
+
+	valueRange := &sheets.ValueRange{
+		Values: [][]interface{}{row},
+	}
+
+	if updateRange != "" {
+		// Обновляем существующую строку с лучшим результатом
+		_, err = service.Spreadsheets.Values.Update(spreadsheetID, updateRange, valueRange).
+			ValueInputOption("USER_ENTERED").
+			Context(ctx).
+			Do()
+		log.Printf("Обновлен лучший результат для пользователя %d: %s", userID, newScoreText)
+
+	} else {
+		// Добавляем новую строку в конец таблицы (для нового пользователя)
+		_, err = service.Spreadsheets.Values.Append(spreadsheetID, sheetRange, valueRange).
+			ValueInputOption("USER_ENTERED").
+			InsertDataOption("INSERT_ROWS").
+			Context(ctx).
+			Do()
+		log.Printf("Записан новый результат для пользователя %d: %s", userID, newScoreText)
+	}
+
+	if err != nil {
+		return fmt.Errorf("ошибка записи/обновления результатов: %w", err)
+	}
+
+	return nil
 }
