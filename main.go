@@ -15,7 +15,7 @@ import (
 )
 
 // !!! ЗАМЕНИТЕ ЭТОТ ID НА ID ВАШЕЙ ТАБЛИЦЫ !!!
-const spreadsheetID = "ВАШ_ID_ТАБЛИЦЫ"
+const spreadsheetID = "12d036WzCPyL97CtbiU2Vx2BQtr2JDDpVx9mBwSTmwo8"
 const sheetRange = "Results1!A:D" // Диапазон для записи результатов
 
 // --- ГЛОБАЛЬНЫЕ СТРУКТУРЫ ДЛЯ ТЕСТОВ ---
