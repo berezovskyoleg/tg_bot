@@ -109,8 +109,15 @@ func main() {
 			// Если это ответ на тест
 			if strings.HasPrefix(callbackData, "answer_") {
 
-				// Проверка, что пользователь начал тест
+				// Проверка, что пользователь начал тест (ДОЛЖНА БЫТЬ ПЕРВОЙ)
 				if _, exists := userState[callback.From.ID]; exists {
+
+					// Получаем юзернейм (с запасным вариантом)
+					userName := callback.From.UserName
+					if userName == "" {
+						userName = fmt.Sprintf("ID_%d", callback.From.ID)
+					}
+
 					// Парсим данные: answer_<индекс вопроса>|<индекс ответа>
 					parts := strings.Split(callbackData, "|")
 					if len(parts) == 2 {
@@ -139,10 +146,10 @@ func main() {
 						editMsg.ReplyMarkup = &tgbotapi.InlineKeyboardMarkup{InlineKeyboard: [][]tgbotapi.InlineKeyboardButton{}} // Убираем кнопки
 						bot.Send(editMsg)
 
-						// Отправляем следующий вопрос или завершаем тест
-						sendQuestion(bot, sheetsService, callback.Message.Chat.ID, callback.From.ID)
+						// Отправляем следующий вопрос или завершаем тест (С КОРРЕКТНЫМ USERNAME)
+						sendQuestion(bot, sheetsService, callback.Message.Chat.ID, callback.From.ID, userName)
 					}
-				}
+				} // Конец if exists
 			} else if callbackData == "show_my_id" {
 				userID := callback.From.ID
 				text := fmt.Sprintf("Твой ID: %d", userID)
@@ -175,15 +182,23 @@ func main() {
 						"Ваша информация:\nID: %d\nИмя: %s\nЮзернейм: @%s",
 						update.Message.From.ID, update.Message.From.FirstName, update.Message.From.UserName)
 					msg.Text = response
+					// ИЗМЕНЕНИЕ 2: Обновление вызова в case "tests"
 				case "tests":
 					if len(currentTest) == 0 {
-						msg.Text = "Тест недоступен. Проверьте логи на ошибки загрузки."
+						// ...
 					} else {
 						// Сбрасываем состояние и счет и начинаем с 0-го вопроса
 						userState[update.Message.From.ID] = 0
 						userScores[update.Message.From.ID] = 0
-						sendQuestion(bot, sheetsService, update.Message.Chat.ID, update.Message.From.ID)
-						continue // Отправка вопроса в sendQuestion, не отправляем тут msg
+
+						// Получаем юзернейм (с запасным вариантом на случай, если он не установлен)
+						userName := update.Message.From.UserName
+						if userName == "" {
+							userName = fmt.Sprintf("ID_%d", update.Message.From.ID)
+						}
+
+						sendQuestion(bot, sheetsService, update.Message.Chat.ID, update.Message.From.ID, userName)
+						continue
 					}
 				default:
 					msg.Text = "Неизвестная команда."
@@ -254,17 +269,20 @@ func loadTestFromSheets(service *sheets.Service, spreadsheetID string) ([]TestQu
 }
 
 // sendQuestion отправляет текущий вопрос пользователю
-func sendQuestion(bot *tgbotapi.BotAPI, service *sheets.Service, chatID int64, userID int64) {
+func sendQuestion(bot *tgbotapi.BotAPI, service *sheets.Service, chatID int64, userID int64, username string) {
 	qIndex := userState[userID]
 
+	// ИЗМЕНЕНИЕ 4: Обновление блока завершения теста в sendQuestion
 	if qIndex >= len(currentTest) {
 		// --- ТЕСТ ЗАВЕРШЕН ---
 		currentScore := userScores[userID]
 		totalQuestions := len(currentTest)
-		username := fmt.Sprintf("@%s", bot.Self.UserName) // Используем юзернейм для записи
+		// УДАЛИТЕ эту строку или убедитесь, что она теперь использует аргумент 'username':
+		// username := fmt.Sprintf("@%s", bot.Self.UserName) <--- ЭТО БЫЛО НЕПРАВИЛЬНО
 
-		// 1. Запись результата в Sheets
+		// Теперь используем 'username' из аргумента функции:
 		err := writeResultToSheets(service, userID, username, currentScore, totalQuestions)
+
 		if err != nil {
 			log.Println("Ошибка записи результата:", err)
 		}
