@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -17,11 +19,16 @@ import (
 
 // !!! ЗАМЕНИТЕ ЭТОТ ID НА ID ВАШЕЙ ТАБЛИЦЫ !!!
 const spreadsheetID = "12d036WzCPyL97CtbiU2Vx2BQtr2JDDpVx9mBwSTmwo8"
-const sheetRange = "Results1!A:D" // Диапазон для записи результатов (пока только Results1)
+const leaderboardSheet = "Leaderboard"
+const leaderboardRange = "A2:D" // <-- Теперь используется
+const writeRangeHtoK = "H:K"    // Диапазон для записи результатов в тесте
+const readRangeH2toK = "H2:K"   // Диапазон для чтения результатов в тесте (пропуская H1)
+const readRangeA2toF = "A2:F"   // Диапазон для чтения вопросов в тесте (пропуская A1)
 
 // --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ДЛЯ ДОСТУПА К API ---
 var sheetsService *sheets.Service
 var botAPI *tgbotapi.BotAPI
+var leaderboardMutex sync.Mutex
 
 // --- ГЛОБАЛЬНЫЕ СТРУКТУРЫ ДЛЯ ТЕСТОВ ---
 
@@ -30,23 +37,23 @@ type TestQuestion struct {
 	ID            string
 	Question      string
 	Options       []string
-	CorrectAnswer int // Индекс правильного ответа (1, 2, 3...)
+	CorrectAnswer int
 }
 
 // Структура для агрегации статистики пользователя
 type UserStats struct {
-	TotalPassed int
+	Username    string
+	UserID      string
 	TotalScore  int
+	TotalPassed int
 }
 
 // Глобальная переменная для хранения текущего загруженного теста
 var currentTest []TestQuestion
+var currentTestName string
 
 // Глобальная переменная для отслеживания состояния пользователя
-// [UserID]CurrentQuestionIndex
 var userState = make(map[int64]int)
-
-// [UserID]Score
 var userScores = make(map[int64]int)
 
 // --- ОСНОВНАЯ ФУНКЦИЯ ---
@@ -68,7 +75,6 @@ func main() {
 	// --- ИНИЦИАЛИЗАЦИЯ GOOGLE SHEETS API (ГЛОБАЛЬНО) ---
 	ctx := context.Background()
 
-	// Аутентификация с помощью JSON-ключа
 	data, err := os.ReadFile("credentials.json")
 	if err != nil {
 		log.Fatalf("Не удалось прочитать JSON-ключ: %v", err)
@@ -87,9 +93,9 @@ func main() {
 	log.Println("Клиент Google Sheets API успешно инициализирован.")
 	// ----------------------------------------
 
-	// --- ЗАГРУЗКА ТЕСТА ИЗ GOOGLE SHEETS ---
-	// Начальная загрузка отключена. Тест загружается при выборе пользователем.
-	// ----------------------------------------
+	// --- ЗАПУСК ФОНОВОГО ОБНОВЛЕНИЯ LEADERBOARD ---
+	go startLeaderboardUpdater()
+	// ------------------------------------------------
 
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
@@ -124,7 +130,6 @@ func main() {
 						userName = fmt.Sprintf("ID_%d", userID)
 					}
 
-					// Парсинг, проверка ответа, увеличение state и score
 					parts := strings.Split(callbackData, "|")
 					if len(parts) == 2 {
 						answerIndex, _ := strconv.Atoi(parts[1])
@@ -139,15 +144,13 @@ func main() {
 
 						userState[userID]++
 
-						// Редактируем сообщение (убираем кнопки)
 						editMsg := tgbotapi.NewEditMessageText(chatID, callback.Message.MessageID, fmt.Sprintf("Вы ответили на вопрос %d. Загружаю следующий...", qIndex+1))
 						editMsg.ReplyMarkup = &tgbotapi.InlineKeyboardMarkup{InlineKeyboard: [][]tgbotapi.InlineKeyboardButton{}}
 						botAPI.Send(editMsg)
 
-						// Отправляем следующий вопрос или завершаем тест
 						sendQuestion(botAPI, sheetsService, chatID, userID, userName)
 					}
-				} // Конец if exists
+				}
 
 				// --- ОБРАБОТКА ВЫБОРА ТЕСТА (нажатие кнопки "Тесты") ---
 			} else if callbackData == "start_tests" {
@@ -159,23 +162,20 @@ func main() {
 					text := "Не удалось загрузить список тестов. Проверьте настройки таблицы."
 					botAPI.Send(tgbotapi.NewMessage(chatID, text))
 				} else if len(testNames) == 0 {
-					text := "Тесты не найдены. Убедитесь, что вкладки с тестами существуют (и не называются 'Results'!)."
+					text := "Тесты не найдены. Создайте вкладки для тестов."
 					botAPI.Send(tgbotapi.NewMessage(chatID, text))
 				} else {
 					var testButtons [][]tgbotapi.InlineKeyboardButton
 					for _, name := range testNames {
-						// Callback data будет "select_ИмяВкладки"
 						btn := tgbotapi.NewInlineKeyboardButtonData(name, "select_"+name)
 						testButtons = append(testButtons, tgbotapi.NewInlineKeyboardRow(btn))
 					}
 
-					// Кнопка "Назад"
 					backButton := tgbotapi.NewInlineKeyboardButtonData("⏪ Назад", "show_start_menu")
 					testButtons = append(testButtons, tgbotapi.NewInlineKeyboardRow(backButton))
 
 					keyboard := tgbotapi.NewInlineKeyboardMarkup(testButtons...)
 
-					// Редактируем сообщение для отображения списка тестов
 					editMsg := tgbotapi.NewEditMessageText(chatID, callback.Message.MessageID, "✅ Доступные тесты:")
 					editMsg.ReplyMarkup = &keyboard
 					botAPI.Send(editMsg)
@@ -191,10 +191,11 @@ func main() {
 				currentTest, errLoad = loadTestFromSheets(sheetsService, spreadsheetID, testName)
 				if errLoad != nil {
 					log.Printf("Ошибка при загрузке теста %s: %v", testName, errLoad)
-					text := fmt.Sprintf("Ошибка загрузки вопросов из вкладки %s.", testName)
+					text := fmt.Sprintf("Ошибка загрузки вопросов из вкладки %s. Убедитесь, что данные начинаются с A2.", testName)
 					botAPI.Send(tgbotapi.NewMessage(chatID, text))
 					return
 				}
+				currentTestName = testName
 
 				// 2. Инициализация и старт теста
 				userState[userID] = 0
@@ -205,18 +206,16 @@ func main() {
 					userName = fmt.Sprintf("ID_%d", userID)
 				}
 
-				// Удаляем предыдущее сообщение с выбором
 				deleteMsg := tgbotapi.NewDeleteMessage(chatID, callback.Message.MessageID)
 				botAPI.Send(deleteMsg)
 
-				// Отправляем первый вопрос
 				sendQuestion(botAPI, sheetsService, chatID, userID, userName)
 
-				// --- ОБРАБОТКА ЛИЧНОГО КАБИНЕТА ---
+				// --- ОБРАБОТКА ЛИЧНОГО КАБИНЕТА (ЧТЕНИЕ ИЗ LEADERBOARD) ---
 			} else if callbackData == "show_lk" {
-				stats, err := getUserStats(sheetsService, userID)
+				stats, err := getUserStatsFromLeaderboard(userID)
 				if err != nil {
-					log.Println("Ошибка получения статистики:", err)
+					log.Println("Ошибка получения статистики из Leaderboard:", err)
 					text := "Не удалось загрузить вашу статистику."
 					botAPI.Send(tgbotapi.NewMessage(chatID, text))
 					return
@@ -229,14 +228,19 @@ func main() {
 					fullName = fmt.Sprintf("ID: %d", userID)
 				}
 
+				scoreText := fmt.Sprintf("%d (по %d тестам)", stats.TotalScore, stats.TotalPassed)
+				if stats.TotalPassed == 0 {
+					scoreText = "Нет пройденных тестов"
+				}
+
 				response := fmt.Sprintf(
 					"📊 *Личный Кабинет*\n"+
 						"Имя/Фамилия: %s\n"+
-						"Пройдено тестов: %d\n"+
-						"Общий балл: %d",
+						"Общий балл: %s\n"+
+						"Пройдено уникальных тестов: %d",
 					fullName,
+					scoreText,
 					stats.TotalPassed,
-					stats.TotalScore,
 				)
 
 				msg := tgbotapi.NewMessage(chatID, response)
@@ -250,7 +254,6 @@ func main() {
 				botAPI.Send(editMsg)
 			}
 
-			// Отправляем ответ на запрос (убирает "часики")
 			callbackConfig := tgbotapi.NewCallback(callback.ID, "Запрос обработан!")
 			botAPI.Request(callbackConfig)
 
@@ -261,7 +264,6 @@ func main() {
 		if update.Message != nil {
 			log.Printf("[%s] %s", update.Message.From.UserName, update.Message.Text)
 
-			// Если это команда
 			if update.Message.IsCommand() {
 				msg := tgbotapi.NewMessage(update.Message.Chat.ID, "")
 				switch update.Message.Command() {
@@ -274,7 +276,6 @@ func main() {
 						update.Message.From.ID, update.Message.From.FirstName, update.Message.From.UserName)
 					msg.Text = response
 				case "tests":
-					// Команда /tests теперь ведет к главному меню для выбора теста через кнопку
 					msg.Text = "Выберите кнопку 'Тесты', чтобы увидеть список доступных викторин."
 					msg.ReplyMarkup = inlineKeyboard
 				default:
@@ -298,10 +299,204 @@ func main() {
 
 // --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 
+// startLeaderboardUpdater запускает фоновый процесс обновления Leaderboard каждые 5 минут
+func startLeaderboardUpdater() {
+	if err := updateLeaderboard(); err != nil {
+		log.Printf("Ошибка при стартовом обновлении Leaderboard: %v", err)
+	} else {
+		log.Println("Leaderboard успешно обновлен при старте.")
+	}
+
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		if err := updateLeaderboard(); err != nil {
+			log.Printf("Ошибка при фоновом обновлении Leaderboard: %v", err)
+		} else {
+			log.Println("Leaderboard успешно обновлен.")
+		}
+	}
+}
+
+// updateLeaderboard агрегирует лучший результат каждого пользователя по всем тестам и записывает в Leaderboard.
+func updateLeaderboard() error {
+	leaderboardMutex.Lock()
+	defer leaderboardMutex.Unlock()
+
+	ctx := context.Background()
+
+	allSheets, err := sheetsService.Spreadsheets.Get(spreadsheetID).Context(ctx).Do()
+	if err != nil {
+		return fmt.Errorf("не удалось получить свойства таблицы для Leaderboard: %w", err)
+	}
+
+	userBestScores := make(map[string]map[string]int)
+	userNames := make(map[string]string)
+
+	// 2. Проходим по всем вкладкам, ища вкладки с тестами
+	for _, sheet := range allSheets.Sheets {
+		sheetTitle := sheet.Properties.Title
+		sheetTitleLower := strings.ToLower(sheetTitle)
+
+		// Фильтруем служебные вкладки
+		if strings.Contains(sheetTitleLower, "leaderboard") || strings.Contains(sheetTitleLower, "results") {
+			continue
+		}
+
+		// Диапазон: H2:K (UserID, Username, Score, Timestamp)
+		readRange := fmt.Sprintf("%s!%s", sheetTitle, readRangeH2toK) // <-- Использование константы readRangeH2toK
+
+		resp, err := sheetsService.Spreadsheets.Values.Get(spreadsheetID, readRange).Context(ctx).Do()
+		if err != nil {
+			log.Printf("Предупреждение: Не удалось прочитать результаты H2:K из вкладки %s: %v", sheetTitle, err)
+			continue
+		}
+
+		// 3. Собираем лучший результат каждого пользователя в этом тесте
+		testName := sheetTitle
+
+		for _, row := range resp.Values {
+			if len(row) < 3 {
+				continue
+			}
+
+			// Колонки: H (индекс 0), I (индекс 1), J (индекс 2)
+			userIDStr := row[0].(string)
+			username := row[1].(string)
+			scoreStr := row[2].(string)
+
+			scoreParts := strings.Split(scoreStr, "/")
+			if len(scoreParts) != 2 {
+				continue
+			}
+			score, err := strconv.Atoi(scoreParts[0])
+			if err != nil {
+				continue
+			}
+
+			userNames[userIDStr] = username
+
+			if _, ok := userBestScores[userIDStr]; !ok {
+				userBestScores[userIDStr] = make(map[string]int)
+			}
+
+			if score > userBestScores[userIDStr][testName] {
+				userBestScores[userIDStr][testName] = score
+			}
+		}
+	}
+
+	// 4. Агрегация: Суммируем баллы и считаем уникальные тесты
+	var aggregatedStats []UserStats
+	for userIDStr, scoresByTest := range userBestScores {
+		totalScore := 0
+		totalPassed := 0
+
+		for _, score := range scoresByTest {
+			totalScore += score
+			totalPassed++
+		}
+
+		aggregatedStats = append(aggregatedStats, UserStats{
+			UserID:      userIDStr,
+			Username:    userNames[userIDStr],
+			TotalScore:  totalScore,
+			TotalPassed: totalPassed,
+		})
+	}
+
+	// 5. Ранжирование по TotalScore (по убыванию)
+	sort.Slice(aggregatedStats, func(i, j int) bool {
+		if aggregatedStats[i].TotalScore != aggregatedStats[j].TotalScore {
+			return aggregatedStats[i].TotalScore > aggregatedStats[j].TotalScore
+		}
+		if aggregatedStats[i].TotalPassed != aggregatedStats[j].TotalPassed {
+			return aggregatedStats[i].TotalPassed > aggregatedStats[j].TotalPassed
+		}
+		return aggregatedStats[i].Username < aggregatedStats[j].Username
+	})
+
+	// 6. Форматирование для записи
+	var values [][]interface{}
+	for _, stat := range aggregatedStats {
+		values = append(values, []interface{}{
+			stat.UserID,
+			stat.Username,
+			stat.TotalScore,
+			stat.TotalPassed,
+		})
+	}
+
+	// 7. Очистка и запись в Leaderboard
+	clearRange := fmt.Sprintf("%s!%s", leaderboardSheet, leaderboardRange) // <-- Использование константы leaderboardRange
+	clearRequest := &sheets.ClearValuesRequest{}
+	sheetsService.Spreadsheets.Values.Clear(spreadsheetID, clearRange, clearRequest).Context(ctx).Do()
+
+	if len(values) > 0 {
+		valueRange := &sheets.ValueRange{
+			Values: values,
+		}
+
+		writeRange := fmt.Sprintf("%s!%s", leaderboardSheet, leaderboardRange) // <-- Использование константы leaderboardRange
+		_, err = sheetsService.Spreadsheets.Values.Update(spreadsheetID, writeRange, valueRange).
+			ValueInputOption("USER_ENTERED").
+			Context(ctx).
+			Do()
+
+		if err != nil {
+			return fmt.Errorf("ошибка записи в Leaderboard: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// getUserStatsFromLeaderboard считывает статистику пользователя из Leaderboard.
+func getUserStatsFromLeaderboard(userID int64) (UserStats, error) {
+	leaderboardMutex.Lock()
+	defer leaderboardMutex.Unlock()
+	ctx := context.Background()
+	stats := UserStats{TotalPassed: 0, TotalScore: 0}
+
+	// Читаем Leaderboard (A: UserID, B: Username, C: Score, D: Passed)
+	readRange := fmt.Sprintf("%s!%s", leaderboardSheet, leaderboardRange) // <-- Использование константы leaderboardRange
+	resp, err := sheetsService.Spreadsheets.Values.Get(spreadsheetID, readRange).Context(ctx).Do()
+	if err != nil {
+		return stats, fmt.Errorf("ошибка чтения Leaderboard: %w", err)
+	}
+
+	userIDStr := fmt.Sprintf("%d", userID)
+
+	if len(resp.Values) == 0 {
+		return stats, nil
+	}
+
+	// Ищем пользователя по UserID в колонке A (индекс 0)
+	for _, row := range resp.Values {
+		if len(row) >= 4 && row[0].(string) == userIDStr {
+			stats.UserID = row[0].(string)
+			stats.Username = row[1].(string)
+
+			// Score is in C (index 2)
+			if score, err := strconv.Atoi(row[2].(string)); err == nil {
+				stats.TotalScore = score
+			}
+			// Passed is in D (index 3)
+			if passed, err := strconv.Atoi(row[3].(string)); err == nil {
+				stats.TotalPassed = passed
+			}
+			return stats, nil
+		}
+	}
+
+	return stats, nil
+}
+
 // loadTestFromSheets считывает вопросы и ответы из указанной вкладки (sheetName)
 func loadTestFromSheets(service *sheets.Service, spreadsheetID string, sheetName string) ([]TestQuestion, error) {
-	// Читаем диапазон A2:F (со второй строки, чтобы пропустить заголовки)
-	readRange := fmt.Sprintf("%s!A2:F", sheetName)
+	// Читаем вопросы из диапазона A2:F
+	readRange := fmt.Sprintf("%s!%s", sheetName, readRangeA2toF) // <-- Использование константы readRangeA2toF
 	ctx := context.Background()
 
 	resp, err := service.Spreadsheets.Values.Get(spreadsheetID, readRange).Context(ctx).Do()
@@ -310,7 +505,7 @@ func loadTestFromSheets(service *sheets.Service, spreadsheetID string, sheetName
 	}
 
 	if len(resp.Values) == 0 {
-		return nil, fmt.Errorf("во вкладке %s не найдено данных", sheetName)
+		return nil, fmt.Errorf("во вкладке %s не найдено вопросов в диапазоне A2:F", sheetName)
 	}
 
 	var testData []TestQuestion
@@ -320,7 +515,6 @@ func loadTestFromSheets(service *sheets.Service, spreadsheetID string, sheetName
 			continue
 		}
 
-		// ВАЖНО: правильный ответ должен быть числом (1, 2 или 3)
 		correct, err := strconv.Atoi(row[5].(string))
 		if err != nil || correct < 1 || correct > 3 {
 			log.Printf("Неверный формат правильного ответа (должно быть 1, 2 или 3) в строке %v: %v", row, row[5])
@@ -347,7 +541,6 @@ func loadTestFromSheets(service *sheets.Service, spreadsheetID string, sheetName
 func getTestNames() ([]string, error) {
 	ctx := context.Background()
 
-	// Запрашиваем только названия листов
 	resp, err := sheetsService.Spreadsheets.Get(spreadsheetID).Context(ctx).Fields("sheets.properties.title").Do()
 	if err != nil {
 		return nil, fmt.Errorf("не удалось получить свойства таблицы: %v", err)
@@ -357,55 +550,16 @@ func getTestNames() ([]string, error) {
 	for _, sheet := range resp.Sheets {
 		title := sheet.Properties.Title
 
-		// 🚨 ФИЛЬТР: Включаем только те вкладки, которые НЕ являются Results или AllResults.
 		titleLower := strings.ToLower(title)
 
-		if strings.Contains(titleLower, "results") || strings.Contains(titleLower, "allresults") {
+		// 🚨 ФИЛЬТР: Исключаем вкладки, содержащие "leaderboard" или "results".
+		if strings.Contains(titleLower, "leaderboard") || strings.Contains(titleLower, "results") {
 			continue
 		}
 
 		testTitles = append(testTitles, title)
 	}
 	return testTitles, nil
-}
-
-// getUserStats считывает результаты пользователя из Sheets и агрегирует статистику.
-func getUserStats(service *sheets.Service, userID int64) (UserStats, error) {
-	ctx := context.Background()
-	stats := UserStats{}
-
-	// Читаем только из Results1
-	readRange := "Results1!A:C"
-	resp, err := service.Spreadsheets.Values.Get(spreadsheetID, readRange).Context(ctx).Do()
-	if err != nil {
-		return stats, fmt.Errorf("ошибка чтения результатов для статистики: %w", err)
-	}
-
-	if len(resp.Values) <= 1 {
-		return stats, nil
-	}
-
-	for i, row := range resp.Values {
-		if i == 0 {
-			continue
-		}
-
-		if len(row) > 0 && row[0] == fmt.Sprintf("%d", userID) {
-			stats.TotalPassed++
-
-			if len(row) >= 3 {
-				scoreText := row[2].(string)
-				scoreParts := strings.Split(scoreText, "/")
-				if len(scoreParts) == 2 {
-					if score, err := strconv.Atoi(scoreParts[0]); err == nil {
-						stats.TotalScore += score
-					}
-				}
-			}
-		}
-	}
-
-	return stats, nil
 }
 
 // sendQuestion отправляет текущий вопрос пользователю
@@ -416,7 +570,7 @@ func sendQuestion(bot *tgbotapi.BotAPI, service *sheets.Service, chatID int64, u
 		currentScore := userScores[userID]
 		totalQuestions := len(currentTest)
 
-		err := writeResultToSheets(service, userID, username, currentScore, totalQuestions)
+		err := writeResultToSheets(service, userID, username, currentScore, totalQuestions, currentTestName)
 
 		if err != nil {
 			log.Println("Ошибка записи результата:", err)
@@ -427,6 +581,13 @@ func sendQuestion(bot *tgbotapi.BotAPI, service *sheets.Service, chatID int64, u
 		if err == nil {
 			finalText += "\nРезультат сохранен и обновлен."
 		}
+
+		// Запускаем асинхронное обновление Leaderboard
+		go func() {
+			if err := updateLeaderboard(); err != nil {
+				log.Printf("Ошибка при обновлении Leaderboard после теста: %v", err)
+			}
+		}()
 
 		finalMsg := tgbotapi.NewMessage(chatID, finalText)
 		bot.Send(finalMsg)
@@ -453,41 +614,46 @@ func sendQuestion(bot *tgbotapi.BotAPI, service *sheets.Service, chatID int64, u
 	}
 }
 
-// writeResultToSheets ищет предыдущий результат пользователя и перезаписывает, если текущий лучше
-func writeResultToSheets(service *sheets.Service, userID int64, username string, currentScore int, totalQuestions int) error {
+// writeResultToSheets ищет предыдущий лучший результат пользователя в той же вкладке и обновляет его.
+func writeResultToSheets(service *sheets.Service, userID int64, username string, currentScore int, totalQuestions int, testName string) error {
 	ctx := context.Background()
 
-	readRange := "Results1!A:D"
+	resultSheetName := testName
+	// Диапазон чтения: H2:K
+	readRange := fmt.Sprintf("%s!%s", resultSheetName, readRangeH2toK) // <-- Использование константы readRangeH2toK
+	// Диапазон записи: H:K
+	writeRange := fmt.Sprintf("%s!%s", resultSheetName, writeRangeHtoK) // <-- Использование константы writeRangeHtoK
+
 	resp, err := service.Spreadsheets.Values.Get(spreadsheetID, readRange).Context(ctx).Do()
 	if err != nil {
-		return fmt.Errorf("ошибка чтения результатов: %w", err)
+		log.Printf("Предупреждение: Не удалось прочитать результаты из %s. Будет предпринята попытка записи новой строки. Ошибка: %v", resultSheetName, err)
 	}
 
-	var updateRange string
+	var updateCellRange string
 	var previousBestScore int
 
-	for i, row := range resp.Values {
-		if i == 0 {
-			continue
-		}
+	if resp != nil && len(resp.Values) > 0 {
+		for i, row := range resp.Values {
+			if len(row) > 0 && row[0] == fmt.Sprintf("%d", userID) {
+				foundRowIndex := i + 2
 
-		if len(row) > 0 && row[0] == fmt.Sprintf("%d", userID) {
-			if len(row) > 2 {
-				scoreParts := strings.Split(row[2].(string), "/")
-				if len(scoreParts) == 2 {
-					if score, err := strconv.Atoi(scoreParts[0]); err == nil {
-						previousBestScore = score
+				if len(row) > 2 {
+					scoreParts := strings.Split(row[2].(string), "/")
+					if len(scoreParts) == 2 {
+						if score, err := strconv.Atoi(scoreParts[0]); err == nil {
+							previousBestScore = score
+						}
 					}
 				}
-			}
 
-			if currentScore <= previousBestScore {
-				log.Printf("Результат пользователя %d (%d) не лучше предыдущего (%d). Пропуск записи.", userID, currentScore, previousBestScore)
-				return nil
-			}
+				if currentScore <= previousBestScore {
+					log.Printf("Результат пользователя %d (%d) в тесте %s не лучше предыдущего (%d). Пропуск записи.", userID, currentScore, testName, previousBestScore)
+					return nil
+				}
 
-			updateRange = fmt.Sprintf("Results1!A%d", i+1)
-			break
+				updateCellRange = fmt.Sprintf("%s!H%d", resultSheetName, foundRowIndex)
+				break
+			}
 		}
 	}
 
@@ -505,24 +671,24 @@ func writeResultToSheets(service *sheets.Service, userID int64, username string,
 		Values: [][]interface{}{row},
 	}
 
-	if updateRange != "" {
-		_, err = service.Spreadsheets.Values.Update(spreadsheetID, updateRange, valueRange).
+	if updateCellRange != "" {
+		_, err = service.Spreadsheets.Values.Update(spreadsheetID, updateCellRange, valueRange).
 			ValueInputOption("USER_ENTERED").
 			Context(ctx).
 			Do()
-		log.Printf("Обновлен лучший результат для пользователя %d: %s", userID, newScoreText)
+		log.Printf("Обновлен лучший результат для пользователя %d в тесте %s: %s", userID, testName, newScoreText)
 
 	} else {
-		_, err = service.Spreadsheets.Values.Append(spreadsheetID, sheetRange, valueRange).
+		_, err = service.Spreadsheets.Values.Append(spreadsheetID, writeRange, valueRange).
 			ValueInputOption("USER_ENTERED").
 			InsertDataOption("INSERT_ROWS").
 			Context(ctx).
 			Do()
-		log.Printf("Записан новый результат для пользователя %d: %s", userID, newScoreText)
+		log.Printf("Записан новый результат для пользователя %d в тесте %s: %s", userID, testName, newScoreText)
 	}
 
 	if err != nil {
-		return fmt.Errorf("ошибка записи/обновления результатов: %w", err)
+		return fmt.Errorf("ошибка записи/обновления результатов в %s: %w", resultSheetName, err)
 	}
 
 	return nil
