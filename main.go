@@ -29,6 +29,12 @@ type TestQuestion struct {
 	CorrectAnswer int // Индекс правильного ответа (1, 2, 3...)
 }
 
+// Структура для агрегации статистики пользователя
+type UserStats struct {
+	TotalPassed int
+	TotalScore  int
+}
+
 // Глобальная переменная для хранения всех тестов
 var currentTest []TestQuestion
 
@@ -58,7 +64,7 @@ func main() {
 	ctx := context.Background()
 
 	// Аутентификация с помощью JSON-ключа
-	data, err := os.ReadFile("credentials.json")
+	data, err := os.ReadFile("/credentials.json") // Убедитесь, что путь верен
 	if err != nil {
 		log.Fatalf("Не удалось прочитать JSON-ключ: %v", err)
 	}
@@ -80,9 +86,11 @@ func main() {
 	var errLoad error
 	currentTest, errLoad = loadTestFromSheets(sheetsService, spreadsheetID)
 	if errLoad != nil {
-		log.Fatalf("Критическая ошибка при загрузке теста: %v", errLoad)
+		// Меняем Fatalf на Printf, чтобы бот не падал, если тест пуст
+		log.Printf("Внимание: Критическая ошибка при загрузке теста или тест пуст: %v", errLoad)
+	} else {
+		log.Printf("Успешно загружено %d вопросов из таблицы.", len(currentTest))
 	}
-	log.Printf("Успешно загружено %d вопросов из таблицы.", len(currentTest))
 	// ----------------------------------------
 
 	u := tgbotapi.NewUpdate(0)
@@ -90,9 +98,13 @@ func main() {
 	updates := bot.GetUpdatesChan(u)
 
 	// --- ИНИЦИАЛИЗАЦИЯ INLINE-КЛАВИАТУРЫ ---
-	buttonID := tgbotapi.NewInlineKeyboardButtonData("Показать мой ID", "show_my_id")
-	buttonGo := tgbotapi.NewInlineKeyboardButtonURL("Сайт Go", "https://golang.org/")
-	keyboardRow := tgbotapi.NewInlineKeyboardRow(buttonID, buttonGo)
+	// Новая кнопка ЛК (Личный Кабинет)
+	buttonLK := tgbotapi.NewInlineKeyboardButtonData("Личный Кабинет (ЛК)", "show_lk")
+
+	// Новая кнопка Тесты (вместо Сайт Go)
+	buttonTests := tgbotapi.NewInlineKeyboardButtonData("Тесты", "start_tests")
+
+	keyboardRow := tgbotapi.NewInlineKeyboardRow(buttonLK, buttonTests)
 	inlineKeyboard := tgbotapi.NewInlineKeyboardMarkup(keyboardRow)
 	// ---------------------------------------
 
@@ -109,7 +121,7 @@ func main() {
 			// Если это ответ на тест
 			if strings.HasPrefix(callbackData, "answer_") {
 
-				// Проверка, что пользователь начал тест (ДОЛЖНА БЫТЬ ПЕРВОЙ)
+				// Проверка, что пользователь начал тест
 				if _, exists := userState[callback.From.ID]; exists {
 
 					// Получаем юзернейм (с запасным вариантом)
@@ -146,16 +158,66 @@ func main() {
 						editMsg.ReplyMarkup = &tgbotapi.InlineKeyboardMarkup{InlineKeyboard: [][]tgbotapi.InlineKeyboardButton{}} // Убираем кнопки
 						bot.Send(editMsg)
 
-						// Отправляем следующий вопрос или завершаем тест (С КОРРЕКТНЫМ USERNAME)
+						// Отправляем следующий вопрос или завершаем тест
 						sendQuestion(bot, sheetsService, callback.Message.Chat.ID, callback.From.ID, userName)
 					}
 				} // Конец if exists
-			} else if callbackData == "show_my_id" {
-				userID := callback.From.ID
-				text := fmt.Sprintf("Твой ID: %d", userID)
-				msg := tgbotapi.NewMessage(callback.Message.Chat.ID, text)
-				if _, err := bot.Send(msg); err != nil {
-					log.Println(err)
+
+			} else if callbackData == "show_lk" {
+				// ЛОГИКА: ЛИЧНЫЙ КАБИНЕТ
+
+				// 1. Получаем статистику
+				stats, err := getUserStats(sheetsService, callback.From.ID)
+				if err != nil {
+					log.Println("Ошибка получения статистики:", err)
+					text := "Не удалось загрузить вашу статистику."
+					msg := tgbotapi.NewMessage(callback.Message.Chat.ID, text)
+					bot.Send(msg)
+					return
+				}
+
+				// 2. Формируем Имя/Фамилию (берем из CallbackQuery)
+				fullName := callback.From.FirstName
+				if callback.From.LastName != "" {
+					fullName += " " + callback.From.LastName
+				} else if fullName == "" {
+					fullName = fmt.Sprintf("ID: %d", callback.From.ID)
+				}
+
+				// 3. Формируем ответ
+				response := fmt.Sprintf(
+					"📊 *Личный Кабинет*\n"+
+						"Имя/Фамилия: %s\n"+
+						"Пройдено тестов: %d\n"+
+						"Общий балл: %d",
+					fullName,
+					stats.TotalPassed,
+					stats.TotalScore,
+				)
+
+				msg := tgbotapi.NewMessage(callback.Message.Chat.ID, response)
+				msg.ParseMode = tgbotapi.ModeMarkdown // Используем Markdown для жирного шрифта
+				bot.Send(msg)
+
+			} else if callbackData == "start_tests" {
+				// ЛОГИКА: ЗАПУСК ТЕСТА
+				if len(currentTest) == 0 {
+					text := "Тест недоступен. Проверьте логи на ошибки загрузки."
+					msg := tgbotapi.NewMessage(callback.Message.Chat.ID, text)
+					bot.Send(msg)
+				} else {
+					// Сбрасываем состояние и счет и начинаем с 0-го вопроса
+					userState[callback.From.ID] = 0
+					userScores[callback.From.ID] = 0
+
+					// Получаем юзернейм (с запасным вариантом на случай, если он не установлен)
+					userName := callback.From.UserName
+					if userName == "" {
+						userName = fmt.Sprintf("ID_%d", callback.From.ID)
+					}
+
+					// Используем ChatID и UserID из Callback
+					sendQuestion(bot, sheetsService, callback.Message.Chat.ID, callback.From.ID, userName)
 				}
 			}
 
@@ -175,17 +237,16 @@ func main() {
 				msg := tgbotapi.NewMessage(update.Message.Chat.ID, "")
 				switch update.Message.Command() {
 				case "start":
-					msg.Text = "Привет! Я бот на GoLang. Используй /tests для начала викторины."
+					msg.Text = "Привет! Я бот на GoLang. Используй /tests или кнопку 'Тесты' для начала викторины."
 					msg.ReplyMarkup = inlineKeyboard
 				case "info":
 					response := fmt.Sprintf(
 						"Ваша информация:\nID: %d\nИмя: %s\nЮзернейм: @%s",
 						update.Message.From.ID, update.Message.From.FirstName, update.Message.From.UserName)
 					msg.Text = response
-					// ИЗМЕНЕНИЕ 2: Обновление вызова в case "tests"
 				case "tests":
 					if len(currentTest) == 0 {
-						// ...
+						msg.Text = "Тест недоступен. Проверьте логи на ошибки загрузки."
 					} else {
 						// Сбрасываем состояние и счет и начинаем с 0-го вопроса
 						userState[update.Message.From.ID] = 0
@@ -268,17 +329,64 @@ func loadTestFromSheets(service *sheets.Service, spreadsheetID string) ([]TestQu
 	return testData, nil
 }
 
+// getUserStats считывает результаты пользователя из Sheets и агрегирует статистику.
+func getUserStats(service *sheets.Service, userID int64) (UserStats, error) {
+	ctx := context.Background()
+	stats := UserStats{}
+
+	// Пока читаем только из Results1, чтобы избежать усложнения.
+	// Если вам нужны данные из Results2/AllResults, это потребует расширения логики.
+	readRange := "Results1!A:C" // A: UserID, B: Username, C: Score
+	resp, err := service.Spreadsheets.Values.Get(spreadsheetID, readRange).Context(ctx).Do()
+	if err != nil {
+		return stats, fmt.Errorf("ошибка чтения результатов для статистики: %w", err)
+	}
+
+	if len(resp.Values) <= 1 {
+		// Нет результатов (кроме заголовков)
+		return stats, nil
+	}
+
+	// Проходим по каждой строке результатов, начиная со второй (индекс 1)
+	for i, row := range resp.Values {
+		if i == 0 { // Пропускаем заголовок
+			continue
+		}
+
+		if len(row) < 3 {
+			// Пропускаем строки с неполными данными
+			continue
+		}
+
+		// Проверяем соответствие UserID
+		sheetUserID := row[0].(string)
+
+		if sheetUserID == fmt.Sprintf("%d", userID) {
+			stats.TotalPassed++
+
+			// Парсим счет (например, "5/10")
+			scoreText := row[2].(string)
+			scoreParts := strings.Split(scoreText, "/")
+			if len(scoreParts) == 2 {
+				if score, err := strconv.Atoi(scoreParts[0]); err == nil {
+					stats.TotalScore += score
+				}
+			}
+		}
+	}
+
+	return stats, nil
+}
+
 // sendQuestion отправляет текущий вопрос пользователю
 func sendQuestion(bot *tgbotapi.BotAPI, service *sheets.Service, chatID int64, userID int64, username string) {
 	qIndex := userState[userID]
 
-	// ИЗМЕНЕНИЕ 4: Обновление блока завершения теста в sendQuestion
+	// Обновленный блок завершения теста в sendQuestion
 	if qIndex >= len(currentTest) {
 		// --- ТЕСТ ЗАВЕРШЕН ---
 		currentScore := userScores[userID]
 		totalQuestions := len(currentTest)
-		// УДАЛИТЕ эту строку или убедитесь, что она теперь использует аргумент 'username':
-		// username := fmt.Sprintf("@%s", bot.Self.UserName) <--- ЭТО БЫЛО НЕПРАВИЛЬНО
 
 		// Теперь используем 'username' из аргумента функции:
 		err := writeResultToSheets(service, userID, username, currentScore, totalQuestions)
@@ -292,7 +400,6 @@ func sendQuestion(bot *tgbotapi.BotAPI, service *sheets.Service, chatID int64, u
 
 		// Проверяем, удалось ли найти и записать/обновить результат
 		if err == nil {
-			// (Здесь можно добавить логику отображения, если результат был улучшен)
 			finalText += "\nРезультат сохранен и обновлен."
 		}
 
