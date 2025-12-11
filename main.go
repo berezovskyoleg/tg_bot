@@ -20,7 +20,7 @@ import (
 // !!! ЗАМЕНИТЕ ЭТОТ ID НА ID ВАШЕЙ ТАБЛИЦЫ !!!
 const spreadsheetID = "12d036WzCPyL97CtbiU2Vx2BQtr2JDDpVx9mBwSTmwo8"
 const leaderboardSheet = "Leaderboard"
-const leaderboardRange = "A2:D" // <-- Теперь используется
+const leaderboardRange = "A2:D" // Теперь используется
 const writeRangeHtoK = "H:K"    // Диапазон для записи результатов в тесте
 const readRangeH2toK = "H2:K"   // Диапазон для чтения результатов в тесте (пропуская H1)
 const readRangeA2toF = "A2:F"   // Диапазон для чтения вопросов в тесте (пропуская A1)
@@ -345,7 +345,7 @@ func updateLeaderboard() error {
 		}
 
 		// Диапазон: H2:K (UserID, Username, Score, Timestamp)
-		readRange := fmt.Sprintf("%s!%s", sheetTitle, readRangeH2toK) // <-- Использование константы readRangeH2toK
+		readRange := fmt.Sprintf("%s!%s", sheetTitle, readRangeH2toK)
 
 		resp, err := sheetsService.Spreadsheets.Values.Get(spreadsheetID, readRange).Context(ctx).Do()
 		if err != nil {
@@ -429,7 +429,7 @@ func updateLeaderboard() error {
 	}
 
 	// 7. Очистка и запись в Leaderboard
-	clearRange := fmt.Sprintf("%s!%s", leaderboardSheet, leaderboardRange) // <-- Использование константы leaderboardRange
+	clearRange := fmt.Sprintf("%s!%s", leaderboardSheet, leaderboardRange) // Использование константы leaderboardRange
 	clearRequest := &sheets.ClearValuesRequest{}
 	sheetsService.Spreadsheets.Values.Clear(spreadsheetID, clearRange, clearRequest).Context(ctx).Do()
 
@@ -438,7 +438,7 @@ func updateLeaderboard() error {
 			Values: values,
 		}
 
-		writeRange := fmt.Sprintf("%s!%s", leaderboardSheet, leaderboardRange) // <-- Использование константы leaderboardRange
+		writeRange := fmt.Sprintf("%s!%s", leaderboardSheet, leaderboardRange) // Использование константы leaderboardRange
 		_, err = sheetsService.Spreadsheets.Values.Update(spreadsheetID, writeRange, valueRange).
 			ValueInputOption("USER_ENTERED").
 			Context(ctx).
@@ -460,7 +460,7 @@ func getUserStatsFromLeaderboard(userID int64) (UserStats, error) {
 	stats := UserStats{TotalPassed: 0, TotalScore: 0}
 
 	// Читаем Leaderboard (A: UserID, B: Username, C: Score, D: Passed)
-	readRange := fmt.Sprintf("%s!%s", leaderboardSheet, leaderboardRange) // <-- Использование константы leaderboardRange
+	readRange := fmt.Sprintf("%s!%s", leaderboardSheet, leaderboardRange) // Использование константы leaderboardRange
 	resp, err := sheetsService.Spreadsheets.Values.Get(spreadsheetID, readRange).Context(ctx).Do()
 	if err != nil {
 		return stats, fmt.Errorf("ошибка чтения Leaderboard: %w", err)
@@ -496,7 +496,7 @@ func getUserStatsFromLeaderboard(userID int64) (UserStats, error) {
 // loadTestFromSheets считывает вопросы и ответы из указанной вкладки (sheetName)
 func loadTestFromSheets(service *sheets.Service, spreadsheetID string, sheetName string) ([]TestQuestion, error) {
 	// Читаем вопросы из диапазона A2:F
-	readRange := fmt.Sprintf("%s!%s", sheetName, readRangeA2toF) // <-- Использование константы readRangeA2toF
+	readRange := fmt.Sprintf("%s!%s", sheetName, readRangeA2toF) // Использование константы readRangeA2toF
 	ctx := context.Background()
 
 	resp, err := service.Spreadsheets.Values.Get(spreadsheetID, readRange).Context(ctx).Do()
@@ -589,7 +589,16 @@ func sendQuestion(bot *tgbotapi.BotAPI, service *sheets.Service, chatID int64, u
 			}
 		}()
 
+		// --- НОВАЯ КЛАВИАТУРА ПОСЛЕ ТЕСТА ---
+		buttonLK := tgbotapi.NewInlineKeyboardButtonData("Личный Кабинет (ЛК)", "show_lk")
+		buttonTests := tgbotapi.NewInlineKeyboardButtonData("К Списку тестов", "start_tests")
+
+		keyboardRow := tgbotapi.NewInlineKeyboardRow(buttonTests, buttonLK)
+		postTestKeyboard := tgbotapi.NewInlineKeyboardMarkup(keyboardRow)
+		// ------------------------------------
+
 		finalMsg := tgbotapi.NewMessage(chatID, finalText)
+		finalMsg.ReplyMarkup = postTestKeyboard // Прикрепляем новую клавиатуру
 		bot.Send(finalMsg)
 
 		delete(userState, userID)
@@ -620,9 +629,9 @@ func writeResultToSheets(service *sheets.Service, userID int64, username string,
 
 	resultSheetName := testName
 	// Диапазон чтения: H2:K
-	readRange := fmt.Sprintf("%s!%s", resultSheetName, readRangeH2toK) // <-- Использование константы readRangeH2toK
+	readRange := fmt.Sprintf("%s!%s", resultSheetName, readRangeH2toK)
 	// Диапазон записи: H:K
-	writeRange := fmt.Sprintf("%s!%s", resultSheetName, writeRangeHtoK) // <-- Использование константы writeRangeHtoK
+	writeRange := fmt.Sprintf("%s!%s", resultSheetName, writeRangeHtoK)
 
 	resp, err := service.Spreadsheets.Values.Get(spreadsheetID, readRange).Context(ctx).Do()
 	if err != nil {
