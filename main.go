@@ -20,7 +20,7 @@ import (
 // !!! ЗАМЕНИТЕ ЭТОТ ID НА ID ВАШЕЙ ТАБЛИЦЫ !!!
 const spreadsheetID = "12d036WzCPyL97CtbiU2Vx2BQtr2JDDpVx9mBwSTmwo8"
 const leaderboardSheet = "Leaderboard"
-const teacherSheet = "Teacher" // Новая константа для вкладки преподавателя
+const teacherSheet = "Teacher"
 const leaderboardRange = "A2:D"
 const writeRangeHtoK = "H:K"
 const readRangeH2toK = "H2:K"
@@ -105,7 +105,7 @@ func main() {
 	// --- ИНИЦИАЛИЗАЦИЯ INLINE-КЛАВИАТУРЫ (ГЛАВНОЕ МЕНЮ) ---
 	buttonLK := tgbotapi.NewInlineKeyboardButtonData("ЛК", "show_lk")
 	buttonTests := tgbotapi.NewInlineKeyboardButtonData("Тесты", "start_tests")
-	buttonTeacher := tgbotapi.NewInlineKeyboardButtonData("Преподаватель", "show_teacher") // НОВАЯ КНОПКА
+	buttonTeacher := tgbotapi.NewInlineKeyboardButtonData("Преподаватель", "show_teacher")
 
 	// Кнопки в два ряда: [Преподаватель, ЛК], [Тесты]
 	keyboardRow1 := tgbotapi.NewInlineKeyboardRow(buttonTeacher, buttonLK)
@@ -256,14 +256,19 @@ func main() {
 
 				botAPI.Send(msg)
 
-				// --- НОВЫЙ БЛОК: ИНФОРМАЦИЯ О ПРЕПОДАВАТЕЛЕ ---
+				// --- НОВЫЙ БЛОК: ИНФОРМАЦИЯ О ПРЕПОДАВАТЕЛЕ (ИСПРАВЛЕН) ---
 			} else if callbackData == "show_teacher" {
 
 				teacherInfo, err := loadTeacherInfo()
 				if err != nil {
 					log.Println("Ошибка загрузки данных преподавателя:", err)
-					text := "Не удалось загрузить информацию о преподавателе. Проверьте вкладку 'Teacher' и ячейки A2:D2."
-					botAPI.Send(tgbotapi.NewMessage(chatID, text))
+					// Используем show_start_menu в качестве кнопки "Назад"
+					backButton := tgbotapi.NewInlineKeyboardButtonData("⏪ Назад", "show_start_menu")
+					keyboard := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(backButton))
+
+					editMsg := tgbotapi.NewEditMessageText(chatID, callback.Message.MessageID, "⚠️ Не удалось загрузить информацию о преподавателе. Проверьте вкладку 'Teacher' и ячейки A2:D2.")
+					editMsg.ReplyMarkup = &keyboard
+					botAPI.Send(editMsg)
 					return
 				}
 
@@ -277,40 +282,45 @@ func main() {
 					teacherInfo["contacts"],
 				)
 
-				// Отправляем фото, если оно есть
+				// Всегда готовим кнопку "Назад"
+				backButton := tgbotapi.NewInlineKeyboardButtonData("⏪ Назад", "show_start_menu")
+				keyboard := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(backButton))
+
+				photoSent := false
+				// 1. Пытаемся отправить фото, если URL присутствует
 				if photoURL, ok := teacherInfo["photo"]; ok && photoURL != "" {
+
+					// Используем tgbotapi.FileURL для фото из URL
 					photoMsg := tgbotapi.NewPhoto(chatID, tgbotapi.FileURL(photoURL))
 					photoMsg.Caption = response
 					photoMsg.ParseMode = tgbotapi.ModeMarkdown
-
-					// Добавляем кнопку "Назад" под фото
-					backButton := tgbotapi.NewInlineKeyboardButtonData("⏪ Назад", "show_start_menu")
-					keyboard := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(backButton))
 					photoMsg.ReplyMarkup = keyboard
 
-					botAPI.Send(photoMsg)
+					// Отправляем фото и проверяем на ошибки
+					if _, err := botAPI.Send(photoMsg); err == nil {
+						photoSent = true
+						// Если фото успешно отправлено, удаляем предыдущее сообщение с кнопкой меню
+						deleteMsg := tgbotapi.NewDeleteMessage(chatID, callback.Message.MessageID)
+						botAPI.Send(deleteMsg)
+					} else {
+						// Если отправка фото не удалась (например, неверный URL или доступ), логируем ошибку
+						log.Printf("Не удалось отправить фото преподавателя (URL: %s): %v. Отправка только текста.", photoURL, err)
+					}
+				}
 
-					// Удаляем предыдущее сообщение (callback.Message), чтобы не оставался текст "Запрос обработан"
-					deleteMsg := tgbotapi.NewDeleteMessage(chatID, callback.Message.MessageID)
-					botAPI.Send(deleteMsg)
-
-				} else {
-					// Если фото нет, отправляем только текст с кнопкой "Назад"
-					msg := tgbotapi.NewMessage(chatID, response)
-					msg.ParseMode = tgbotapi.ModeMarkdown
-
-					backButton := tgbotapi.NewInlineKeyboardButtonData("⏪ Назад", "show_start_menu")
-					keyboard := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(backButton))
-					msg.ReplyMarkup = keyboard
-
-					// Редактируем сообщение, если это возможно, или отправляем новое
+				// 2. Если фото не отправлено (из-за отсутствия URL или ошибки), отправляем только текст
+				if !photoSent {
 					editMsg := tgbotapi.NewEditMessageText(chatID, callback.Message.MessageID, response)
 					editMsg.ReplyMarkup = &keyboard
 					editMsg.ParseMode = tgbotapi.ModeMarkdown
 
+					// Попытка редактирования, чтобы не спамить
 					if _, err := botAPI.Send(editMsg); err != nil {
-						// Если редактирование не удалось (например, сообщение старое), отправляем новое
-						botAPI.Send(msg)
+						// Если редактирование не удалось, отправляем новое сообщение
+						newMsg := tgbotapi.NewMessage(chatID, response)
+						newMsg.ReplyMarkup = keyboard
+						newMsg.ParseMode = tgbotapi.ModeMarkdown
+						botAPI.Send(newMsg)
 					}
 				}
 
@@ -583,7 +593,12 @@ func loadTeacherInfo() (map[string]string, error) {
 	}
 
 	if len(resp.Values) == 0 || len(resp.Values[0]) < 4 {
-		return nil, fmt.Errorf("не найдена строка с данными в диапазоне A2:D2 во вкладке Teacher")
+		// Даже если данных нет, возвращаем пустую карту, чтобы избежать паники,
+		// но с ошибкой, чтобы инициировать запасной текстовый ответ
+		return map[string]string{
+			"photo": "", "name": "Не указано",
+			"description": "Не указано", "contacts": "Не указано",
+		}, fmt.Errorf("не найдена строка с данными в диапазоне A2:D2 во вкладке Teacher")
 	}
 
 	row := resp.Values[0]
