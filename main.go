@@ -20,10 +20,11 @@ import (
 // !!! ЗАМЕНИТЕ ЭТОТ ID НА ID ВАШЕЙ ТАБЛИЦЫ !!!
 const spreadsheetID = "12d036WzCPyL97CtbiU2Vx2BQtr2JDDpVx9mBwSTmwo8"
 const leaderboardSheet = "Leaderboard"
-const leaderboardRange = "A2:D" // Теперь используется
-const writeRangeHtoK = "H:K"    // Диапазон для записи результатов в тесте
-const readRangeH2toK = "H2:K"   // Диапазон для чтения результатов в тесте (пропуская H1)
-const readRangeA2toF = "A2:F"   // Диапазон для чтения вопросов в тесте (пропуская A1)
+const teacherSheet = "Teacher" // Новая константа для вкладки преподавателя
+const leaderboardRange = "A2:D"
+const writeRangeHtoK = "H:K"
+const readRangeH2toK = "H2:K"
+const readRangeA2toF = "A2:F"
 
 // --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ДЛЯ ДОСТУПА К API ---
 var sheetsService *sheets.Service
@@ -101,12 +102,15 @@ func main() {
 	u.Timeout = 60
 	updates := botAPI.GetUpdatesChan(u)
 
-	// --- ИНИЦИАЛИЗАЦИЯ INLINE-КЛАВИАТУРЫ ---
-	buttonLK := tgbotapi.NewInlineKeyboardButtonData("Личный Кабинет (ЛК)", "show_lk")
+	// --- ИНИЦИАЛИЗАЦИЯ INLINE-КЛАВИАТУРЫ (ГЛАВНОЕ МЕНЮ) ---
+	buttonLK := tgbotapi.NewInlineKeyboardButtonData("ЛК", "show_lk")
 	buttonTests := tgbotapi.NewInlineKeyboardButtonData("Тесты", "start_tests")
+	buttonTeacher := tgbotapi.NewInlineKeyboardButtonData("Преподаватель", "show_teacher") // НОВАЯ КНОПКА
 
-	keyboardRow := tgbotapi.NewInlineKeyboardRow(buttonLK, buttonTests)
-	inlineKeyboard := tgbotapi.NewInlineKeyboardMarkup(keyboardRow)
+	// Кнопки в два ряда: [Преподаватель, ЛК], [Тесты]
+	keyboardRow1 := tgbotapi.NewInlineKeyboardRow(buttonTeacher, buttonLK)
+	keyboardRow2 := tgbotapi.NewInlineKeyboardRow(buttonTests)
+	inlineKeyboard := tgbotapi.NewInlineKeyboardMarkup(keyboardRow1, keyboardRow2)
 	// ---------------------------------------
 
 	// Обрабатываем обновления
@@ -245,13 +249,87 @@ func main() {
 
 				msg := tgbotapi.NewMessage(chatID, response)
 				msg.ParseMode = tgbotapi.ModeMarkdown
+
+				backButton := tgbotapi.NewInlineKeyboardButtonData("⏪ Назад", "show_start_menu")
+				keyboard := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(backButton))
+				msg.ReplyMarkup = keyboard
+
 				botAPI.Send(msg)
 
-				// --- ОБРАБОТКА КНОПКИ НАЗАД ---
+				// --- НОВЫЙ БЛОК: ИНФОРМАЦИЯ О ПРЕПОДАВАТЕЛЕ ---
+			} else if callbackData == "show_teacher" {
+
+				teacherInfo, err := loadTeacherInfo()
+				if err != nil {
+					log.Println("Ошибка загрузки данных преподавателя:", err)
+					text := "Не удалось загрузить информацию о преподавателе. Проверьте вкладку 'Teacher' и ячейки A2:D2."
+					botAPI.Send(tgbotapi.NewMessage(chatID, text))
+					return
+				}
+
+				response := fmt.Sprintf(
+					"🧑‍🏫 *Преподаватель*\n"+
+						"*%s*\n\n"+
+						"%s\n\n"+
+						"✉️ Контакты: %s",
+					teacherInfo["name"],
+					teacherInfo["description"],
+					teacherInfo["contacts"],
+				)
+
+				// Отправляем фото, если оно есть
+				if photoURL, ok := teacherInfo["photo"]; ok && photoURL != "" {
+					photoMsg := tgbotapi.NewPhoto(chatID, tgbotapi.FileURL(photoURL))
+					photoMsg.Caption = response
+					photoMsg.ParseMode = tgbotapi.ModeMarkdown
+
+					// Добавляем кнопку "Назад" под фото
+					backButton := tgbotapi.NewInlineKeyboardButtonData("⏪ Назад", "show_start_menu")
+					keyboard := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(backButton))
+					photoMsg.ReplyMarkup = keyboard
+
+					botAPI.Send(photoMsg)
+
+					// Удаляем предыдущее сообщение (callback.Message), чтобы не оставался текст "Запрос обработан"
+					deleteMsg := tgbotapi.NewDeleteMessage(chatID, callback.Message.MessageID)
+					botAPI.Send(deleteMsg)
+
+				} else {
+					// Если фото нет, отправляем только текст с кнопкой "Назад"
+					msg := tgbotapi.NewMessage(chatID, response)
+					msg.ParseMode = tgbotapi.ModeMarkdown
+
+					backButton := tgbotapi.NewInlineKeyboardButtonData("⏪ Назад", "show_start_menu")
+					keyboard := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(backButton))
+					msg.ReplyMarkup = keyboard
+
+					// Редактируем сообщение, если это возможно, или отправляем новое
+					editMsg := tgbotapi.NewEditMessageText(chatID, callback.Message.MessageID, response)
+					editMsg.ReplyMarkup = &keyboard
+					editMsg.ParseMode = tgbotapi.ModeMarkdown
+
+					if _, err := botAPI.Send(editMsg); err != nil {
+						// Если редактирование не удалось (например, сообщение старое), отправляем новое
+						botAPI.Send(msg)
+					}
+				}
+
+				// --- ОБРАБОТКА КНОПКИ НАЗАД (возврат в главное меню) ---
 			} else if callbackData == "show_start_menu" {
-				editMsg := tgbotapi.NewEditMessageText(chatID, callback.Message.MessageID, "Привет! Выберите действие:")
+
+				// Генерируем сообщение главного меню
+				msgText := "Привет! Выберите действие:"
+
+				// Проверяем, можем ли мы отредактировать текущее сообщение (если это не inline-кнопка ответа)
+				editMsg := tgbotapi.NewEditMessageText(chatID, callback.Message.MessageID, msgText)
 				editMsg.ReplyMarkup = &inlineKeyboard
-				botAPI.Send(editMsg)
+
+				if _, err := botAPI.Send(editMsg); err != nil {
+					// Если редактирование не удалось (например, сообщение было удалено/старое), отправляем новое
+					newMsg := tgbotapi.NewMessage(chatID, msgText)
+					newMsg.ReplyMarkup = inlineKeyboard
+					botAPI.Send(newMsg)
+				}
 			}
 
 			callbackConfig := tgbotapi.NewCallback(callback.ID, "Запрос обработан!")
@@ -339,8 +417,8 @@ func updateLeaderboard() error {
 		sheetTitle := sheet.Properties.Title
 		sheetTitleLower := strings.ToLower(sheetTitle)
 
-		// Фильтруем служебные вкладки
-		if strings.Contains(sheetTitleLower, "leaderboard") || strings.Contains(sheetTitleLower, "results") {
+		// Фильтруем служебные вкладки, включая Teacher
+		if strings.Contains(sheetTitleLower, "leaderboard") || strings.Contains(sheetTitleLower, "results") || sheetTitle == teacherSheet {
 			continue
 		}
 
@@ -429,7 +507,7 @@ func updateLeaderboard() error {
 	}
 
 	// 7. Очистка и запись в Leaderboard
-	clearRange := fmt.Sprintf("%s!%s", leaderboardSheet, leaderboardRange) // Использование константы leaderboardRange
+	clearRange := fmt.Sprintf("%s!%s", leaderboardSheet, leaderboardRange)
 	clearRequest := &sheets.ClearValuesRequest{}
 	sheetsService.Spreadsheets.Values.Clear(spreadsheetID, clearRange, clearRequest).Context(ctx).Do()
 
@@ -438,7 +516,7 @@ func updateLeaderboard() error {
 			Values: values,
 		}
 
-		writeRange := fmt.Sprintf("%s!%s", leaderboardSheet, leaderboardRange) // Использование константы leaderboardRange
+		writeRange := fmt.Sprintf("%s!%s", leaderboardSheet, leaderboardRange)
 		_, err = sheetsService.Spreadsheets.Values.Update(spreadsheetID, writeRange, valueRange).
 			ValueInputOption("USER_ENTERED").
 			Context(ctx).
@@ -460,7 +538,7 @@ func getUserStatsFromLeaderboard(userID int64) (UserStats, error) {
 	stats := UserStats{TotalPassed: 0, TotalScore: 0}
 
 	// Читаем Leaderboard (A: UserID, B: Username, C: Score, D: Passed)
-	readRange := fmt.Sprintf("%s!%s", leaderboardSheet, leaderboardRange) // Использование константы leaderboardRange
+	readRange := fmt.Sprintf("%s!%s", leaderboardSheet, leaderboardRange)
 	resp, err := sheetsService.Spreadsheets.Values.Get(spreadsheetID, readRange).Context(ctx).Do()
 	if err != nil {
 		return stats, fmt.Errorf("ошибка чтения Leaderboard: %w", err)
@@ -493,10 +571,49 @@ func getUserStatsFromLeaderboard(userID int64) (UserStats, error) {
 	return stats, nil
 }
 
+// loadTeacherInfo считывает информацию о преподавателе из вкладки Teacher (A2:D2)
+func loadTeacherInfo() (map[string]string, error) {
+	ctx := context.Background()
+	// Читаем только одну строку A2:D2
+	readRange := fmt.Sprintf("%s!A2:D2", teacherSheet)
+
+	resp, err := sheetsService.Spreadsheets.Values.Get(spreadsheetID, readRange).Context(ctx).Do()
+	if err != nil {
+		return nil, fmt.Errorf("ошибка получения данных о преподавателе из Sheets: %w", err)
+	}
+
+	if len(resp.Values) == 0 || len(resp.Values[0]) < 4 {
+		return nil, fmt.Errorf("не найдена строка с данными в диапазоне A2:D2 во вкладке Teacher")
+	}
+
+	row := resp.Values[0]
+
+	info := make(map[string]string)
+
+	// A2: photo (индекс 0)
+	if len(row) > 0 {
+		info["photo"] = row[0].(string)
+	}
+	// B2: name (индекс 1)
+	if len(row) > 1 {
+		info["name"] = row[1].(string)
+	}
+	// C2: description (индекс 2)
+	if len(row) > 2 {
+		info["description"] = row[2].(string)
+	}
+	// D2: contacts (индекс 3)
+	if len(row) > 3 {
+		info["contacts"] = row[3].(string)
+	}
+
+	return info, nil
+}
+
 // loadTestFromSheets считывает вопросы и ответы из указанной вкладки (sheetName)
 func loadTestFromSheets(service *sheets.Service, spreadsheetID string, sheetName string) ([]TestQuestion, error) {
 	// Читаем вопросы из диапазона A2:F
-	readRange := fmt.Sprintf("%s!%s", sheetName, readRangeA2toF) // Использование константы readRangeA2toF
+	readRange := fmt.Sprintf("%s!%s", sheetName, readRangeA2toF)
 	ctx := context.Background()
 
 	resp, err := service.Spreadsheets.Values.Get(spreadsheetID, readRange).Context(ctx).Do()
@@ -552,8 +669,8 @@ func getTestNames() ([]string, error) {
 
 		titleLower := strings.ToLower(title)
 
-		// 🚨 ФИЛЬТР: Исключаем вкладки, содержащие "leaderboard" или "results".
-		if strings.Contains(titleLower, "leaderboard") || strings.Contains(titleLower, "results") {
+		// 🚨 ФИЛЬТР: Исключаем служебные вкладки: Leaderboard, Results и Teacher.
+		if strings.Contains(titleLower, "leaderboard") || strings.Contains(titleLower, "results") || title == teacherSheet {
 			continue
 		}
 
@@ -589,16 +706,20 @@ func sendQuestion(bot *tgbotapi.BotAPI, service *sheets.Service, chatID int64, u
 			}
 		}()
 
-		// --- НОВАЯ КЛАВИАТУРА ПОСЛЕ ТЕСТА ---
-		buttonLK := tgbotapi.NewInlineKeyboardButtonData("Личный Кабинет (ЛК)", "show_lk")
-		buttonTests := tgbotapi.NewInlineKeyboardButtonData("К Списку тестов", "start_tests")
+		// --- КЛАВИАТУРА ПОСЛЕ ТЕСТА ---
+		buttonLK := tgbotapi.NewInlineKeyboardButtonData("ЛК", "show_lk")
+		buttonTests := tgbotapi.NewInlineKeyboardButtonData("Тесты", "start_tests")
 
-		keyboardRow := tgbotapi.NewInlineKeyboardRow(buttonTests, buttonLK)
-		postTestKeyboard := tgbotapi.NewInlineKeyboardMarkup(keyboardRow)
+		// Кнопка "Назад" ведет в главное меню (show_start_menu)
+		backToMain := tgbotapi.NewInlineKeyboardButtonData("⏪ Назад", "show_start_menu")
+
+		keyboardRow1 := tgbotapi.NewInlineKeyboardRow(buttonTests, buttonLK)
+		keyboardRow2 := tgbotapi.NewInlineKeyboardRow(backToMain)
+		postTestKeyboard := tgbotapi.NewInlineKeyboardMarkup(keyboardRow1, keyboardRow2)
 		// ------------------------------------
 
 		finalMsg := tgbotapi.NewMessage(chatID, finalText)
-		finalMsg.ReplyMarkup = postTestKeyboard // Прикрепляем новую клавиатуру
+		finalMsg.ReplyMarkup = postTestKeyboard
 		bot.Send(finalMsg)
 
 		delete(userState, userID)
