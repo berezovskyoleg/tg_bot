@@ -19,7 +19,7 @@ import (
 
 // !!! ЗАМЕНИТЕ ЭТОТ ID НА ID ВАШЕЙ ТАБЛИЦЫ !!!
 // Убедитесь, что вы вставляете сюда свой реальный ID таблицы.
-const spreadsheetID = "12d036WzCPyR97CtbiU2Vx2BQtr2JDDpVx9mBwSTmwo8"
+const spreadsheetID = "12d036WzCPyL97CtbiU2Vx2BQtr2JDDpVx9mBwSTmwo8"
 
 const leaderboardSheet = "Leaderboard"
 const teacherSheet = "Teacher"
@@ -28,9 +28,9 @@ const writeRangeHtoK = "H:K"
 const readRangeH2toK = "H2:K"
 const readRangeA2toF = "A2:F"
 
-// НОВЫЙ ДИАПАЗОН ЧТЕНИЯ для Teacher
-const teacherReadRangeA = "A2:A10" // Имя, Фото, Аудио, Видео, Контакты
-const teacherReadRangeB = "B2:B12" // Описание
+// ИСПРАВЛЕННЫЙ ДИАПАЗОН ЧТЕНИЯ для Teacher: читаем только заполненные ячейки А
+const teacherReadRangeA = "A2,A4,A6,A8,A10"
+const teacherReadRangeB = "B2:B12" // Диапазон B остается прежним
 
 // --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ДЛЯ ДОСТУПА К API ---
 var sheetsService *sheets.Service
@@ -72,6 +72,7 @@ func main() {
 	}
 
 	var err error
+	// ИСПРАВЛЕНО: NewNewBotAPI -> NewBotAPI
 	botAPI, err = tgbotapi.NewBotAPI(botToken)
 	if err != nil {
 		log.Panic(err)
@@ -262,11 +263,12 @@ func main() {
 
 				botAPI.Send(msg)
 
-				// --- НОВЫЙ БЛОК: ИНФОРМАЦИЯ О ПРЕПОДАВАТЕЛЕ (С НОВЫМ ПОРЯДКОМ И ЯЧЕЙКАМИ) ---
+				// --- БЛОК: ИНФОРМАЦИЯ О ПРЕПОДАВАТЕЛЕ ---
 			} else if callbackData == "show_teacher" {
 
 				teacherInfo, err := loadTeacherInfo()
 				if err != nil {
+					// Логирование ошибки для отладки
 					log.Println("Ошибка загрузки данных преподавателя:", err)
 					backButton := tgbotapi.NewInlineKeyboardButtonData("⏪ Назад", "show_start_menu")
 					keyboard := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(backButton))
@@ -287,14 +289,12 @@ func main() {
 					teacherInfo["contacts"],
 				)
 
-				// Всегда готовим кнопку "Назад"
 				backButton := tgbotapi.NewInlineKeyboardButtonData("⏪ Назад", "show_start_menu")
 				keyboard := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(backButton))
 
-				// Флаг для отслеживания ID последнего сообщения
 				lastMsgID := callback.Message.MessageID
 
-				// Удаляем исходное сообщение-кнопку, чтобы не мешало
+				// Удаляем исходное сообщение-кнопку
 				deleteMsg := tgbotapi.NewDeleteMessage(chatID, callback.Message.MessageID)
 				botAPI.Send(deleteMsg)
 
@@ -605,11 +605,11 @@ func getUserStatsFromLeaderboard(userID int64) (UserStats, error) {
 	return stats, nil
 }
 
-// loadTeacherInfo считывает информацию о преподавателе из новых ячеек
+// loadTeacherInfo считывает информацию о преподавателе из НОВЫХ ячеек A2,A4,A6,A8,A10 и B2:B12.
 func loadTeacherInfo() (map[string]string, error) {
 	ctx := context.Background()
 
-	// Читаем колонку A (A2, A4, A6, A8, A10)
+	// Читаем колонку A (A2,A4,A6,A8,A10)
 	respA, errA := sheetsService.Spreadsheets.Values.Get(spreadsheetID, fmt.Sprintf("%s!%s", teacherSheet, teacherReadRangeA)).Context(ctx).Do()
 	if errA != nil {
 		return nil, fmt.Errorf("ошибка получения данных из Sheets (A): %w", errA)
@@ -623,7 +623,7 @@ func loadTeacherInfo() (map[string]string, error) {
 
 	info := make(map[string]string)
 
-	// 1. Чтение данных из столбца A
+	// 1. Чтение данных из столбца A (Используем новые индексы 0, 1, 2, 3, 4)
 
 	// A2 (индекс 0): Name
 	if len(respA.Values) > 0 && len(respA.Values[0]) > 0 {
@@ -632,24 +632,24 @@ func loadTeacherInfo() (map[string]string, error) {
 		info["name"] = "Не указано"
 	}
 
-	// A4 (индекс 2): Photo URL
+	// A4 (индекс 1): Photo URL
+	if len(respA.Values) > 1 && len(respA.Values[1]) > 0 {
+		info["photo"] = respA.Values[1][0].(string)
+	}
+
+	// A6 (индекс 2): Audio URL
 	if len(respA.Values) > 2 && len(respA.Values[2]) > 0 {
-		info["photo"] = respA.Values[2][0].(string)
+		info["audio"] = respA.Values[2][0].(string)
 	}
 
-	// A6 (индекс 4): Audio URL
+	// A8 (индекс 3): Video URL
+	if len(respA.Values) > 3 && len(respA.Values[3]) > 0 {
+		info["video"] = respA.Values[3][0].(string)
+	}
+
+	// A10 (индекс 4): Contacts
 	if len(respA.Values) > 4 && len(respA.Values[4]) > 0 {
-		info["audio"] = respA.Values[4][0].(string)
-	}
-
-	// A8 (индекс 6): Video URL
-	if len(respA.Values) > 6 && len(respA.Values[6]) > 0 {
-		info["video"] = respA.Values[6][0].(string)
-	}
-
-	// A10 (индекс 8): Contacts
-	if len(respA.Values) > 8 && len(respA.Values[8]) > 0 {
-		info["contacts"] = respA.Values[8][0].(string)
+		info["contacts"] = respA.Values[4][0].(string)
 	} else {
 		info["contacts"] = "Не указано"
 	}
