@@ -18,13 +18,19 @@ import (
 )
 
 // !!! ЗАМЕНИТЕ ЭТОТ ID НА ID ВАШЕЙ ТАБЛИЦЫ !!!
-const spreadsheetID = "12d036WzCPyL97CtbiU2Vx2BQtr2JDDpVx9mBwSTmwo8"
+// Убедитесь, что вы вставляете сюда свой реальный ID таблицы.
+const spreadsheetID = "12d036WzCPyR97CtbiU2Vx2BQtr2JDDpVx9mBwSTmwo8"
+
 const leaderboardSheet = "Leaderboard"
 const teacherSheet = "Teacher"
 const leaderboardRange = "A2:D"
 const writeRangeHtoK = "H:K"
 const readRangeH2toK = "H2:K"
 const readRangeA2toF = "A2:F"
+
+// НОВЫЙ ДИАПАЗОН ЧТЕНИЯ для Teacher
+const teacherReadRangeA = "A2:A10" // Имя, Фото, Аудио, Видео, Контакты
+const teacherReadRangeB = "B2:B12" // Описание
 
 // --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ДЛЯ ДОСТУПА К API ---
 var sheetsService *sheets.Service
@@ -256,25 +262,24 @@ func main() {
 
 				botAPI.Send(msg)
 
-				// --- НОВЫЙ БЛОК: ИНФОРМАЦИЯ О ПРЕПОДАВАТЕЛЕ (ИСПРАВЛЕН) ---
+				// --- НОВЫЙ БЛОК: ИНФОРМАЦИЯ О ПРЕПОДАВАТЕЛЕ (С НОВЫМ ПОРЯДКОМ И ЯЧЕЙКАМИ) ---
 			} else if callbackData == "show_teacher" {
 
 				teacherInfo, err := loadTeacherInfo()
 				if err != nil {
 					log.Println("Ошибка загрузки данных преподавателя:", err)
-					// Используем show_start_menu в качестве кнопки "Назад"
 					backButton := tgbotapi.NewInlineKeyboardButtonData("⏪ Назад", "show_start_menu")
 					keyboard := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(backButton))
 
-					editMsg := tgbotapi.NewEditMessageText(chatID, callback.Message.MessageID, "⚠️ Не удалось загрузить информацию о преподавателе. Проверьте вкладку 'Teacher' и ячейки A2:D2.")
+					editMsg := tgbotapi.NewEditMessageText(chatID, callback.Message.MessageID, "⚠️ Не удалось загрузить информацию о преподавателе. Проверьте вкладку 'Teacher' и новый диапазон ячеек.")
 					editMsg.ReplyMarkup = &keyboard
 					botAPI.Send(editMsg)
 					return
 				}
 
+				// 1. Формируем ТЕКСТ (Имя + Описание + Контакты)
 				response := fmt.Sprintf(
-					"🧑‍🏫 *Преподаватель*\n"+
-						"*%s*\n\n"+
+					"🧑‍🏫 *%s*\n\n"+
 						"%s\n\n"+
 						"✉️ Контакты: %s",
 					teacherInfo["name"],
@@ -286,56 +291,75 @@ func main() {
 				backButton := tgbotapi.NewInlineKeyboardButtonData("⏪ Назад", "show_start_menu")
 				keyboard := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(backButton))
 
-				photoSent := false
-				// 1. Пытаемся отправить фото, если URL присутствует
-				if photoURL, ok := teacherInfo["photo"]; ok && photoURL != "" {
+				// Флаг для отслеживания ID последнего сообщения
+				lastMsgID := callback.Message.MessageID
 
-					// Используем tgbotapi.FileURL для фото из URL
+				// Удаляем исходное сообщение-кнопку, чтобы не мешало
+				deleteMsg := tgbotapi.NewDeleteMessage(chatID, callback.Message.MessageID)
+				botAPI.Send(deleteMsg)
+
+				// --- 2. Отправка Фото + Текст (в подписи) ---
+				photoSent := false
+				if photoURL, ok := teacherInfo["photo"]; ok && photoURL != "" {
 					photoMsg := tgbotapi.NewPhoto(chatID, tgbotapi.FileURL(photoURL))
 					photoMsg.Caption = response
 					photoMsg.ParseMode = tgbotapi.ModeMarkdown
-					photoMsg.ReplyMarkup = keyboard
 
-					// Отправляем фото и проверяем на ошибки
-					if _, err := botAPI.Send(photoMsg); err == nil {
+					if sentMsg, err := botAPI.Send(photoMsg); err == nil {
 						photoSent = true
-						// Если фото успешно отправлено, удаляем предыдущее сообщение с кнопкой меню
-						deleteMsg := tgbotapi.NewDeleteMessage(chatID, callback.Message.MessageID)
-						botAPI.Send(deleteMsg)
+						lastMsgID = sentMsg.MessageID
 					} else {
-						// Если отправка фото не удалась (например, неверный URL или доступ), логируем ошибку
 						log.Printf("Не удалось отправить фото преподавателя (URL: %s): %v. Отправка только текста.", photoURL, err)
 					}
 				}
 
-				// 2. Если фото не отправлено (из-за отсутствия URL или ошибки), отправляем только текст
+				// Если фото не было отправлено, отправляем только текст (новое сообщение)
 				if !photoSent {
-					editMsg := tgbotapi.NewEditMessageText(chatID, callback.Message.MessageID, response)
-					editMsg.ReplyMarkup = &keyboard
-					editMsg.ParseMode = tgbotapi.ModeMarkdown
+					newMsg := tgbotapi.NewMessage(chatID, response)
+					newMsg.ParseMode = tgbotapi.ModeMarkdown
 
-					// Попытка редактирования, чтобы не спамить
-					if _, err := botAPI.Send(editMsg); err != nil {
-						// Если редактирование не удалось, отправляем новое сообщение
-						newMsg := tgbotapi.NewMessage(chatID, response)
-						newMsg.ReplyMarkup = keyboard
-						newMsg.ParseMode = tgbotapi.ModeMarkdown
-						botAPI.Send(newMsg)
+					if sentMsg, err := botAPI.Send(newMsg); err == nil {
+						lastMsgID = sentMsg.MessageID
 					}
+				}
+
+				// --- 3. Отправка Видео ---
+				if videoURL, ok := teacherInfo["video"]; ok && videoURL != "" {
+					videoMsg := tgbotapi.NewVideo(chatID, tgbotapi.FileURL(videoURL))
+
+					if sentMsg, err := botAPI.Send(videoMsg); err == nil {
+						lastMsgID = sentMsg.MessageID
+					} else {
+						log.Printf("Не удалось отправить видео (URL: %s): %v.", videoURL, err)
+					}
+				}
+
+				// --- 4. Отправка Аудио ---
+				if audioURL, ok := teacherInfo["audio"]; ok && audioURL != "" {
+					audioMsg := tgbotapi.NewAudio(chatID, tgbotapi.FileURL(audioURL))
+
+					if sentMsg, err := botAPI.Send(audioMsg); err == nil {
+						lastMsgID = sentMsg.MessageID
+					} else {
+						log.Printf("Не удалось отправить аудио (URL: %s): %v.", audioURL, err)
+					}
+				}
+
+				// --- 5. Прикрепляем кнопку "Назад" к последнему отправленному сообщению ---
+				if lastMsgID != 0 {
+					editMarkup := tgbotapi.NewEditMessageReplyMarkup(chatID, lastMsgID, keyboard)
+					botAPI.Send(editMarkup)
 				}
 
 				// --- ОБРАБОТКА КНОПКИ НАЗАД (возврат в главное меню) ---
 			} else if callbackData == "show_start_menu" {
 
-				// Генерируем сообщение главного меню
 				msgText := "Привет! Выберите действие:"
 
-				// Проверяем, можем ли мы отредактировать текущее сообщение (если это не inline-кнопка ответа)
 				editMsg := tgbotapi.NewEditMessageText(chatID, callback.Message.MessageID, msgText)
 				editMsg.ReplyMarkup = &inlineKeyboard
 
 				if _, err := botAPI.Send(editMsg); err != nil {
-					// Если редактирование не удалось (например, сообщение было удалено/старое), отправляем новое
 					newMsg := tgbotapi.NewMessage(chatID, msgText)
 					newMsg.ReplyMarkup = inlineKeyboard
 					botAPI.Send(newMsg)
@@ -581,46 +605,72 @@ func getUserStatsFromLeaderboard(userID int64) (UserStats, error) {
 	return stats, nil
 }
 
-// loadTeacherInfo считывает информацию о преподавателе из вкладки Teacher (A2:D2)
+// loadTeacherInfo считывает информацию о преподавателе из новых ячеек
 func loadTeacherInfo() (map[string]string, error) {
 	ctx := context.Background()
-	// Читаем только одну строку A2:D2
-	readRange := fmt.Sprintf("%s!A2:D2", teacherSheet)
 
-	resp, err := sheetsService.Spreadsheets.Values.Get(spreadsheetID, readRange).Context(ctx).Do()
-	if err != nil {
-		return nil, fmt.Errorf("ошибка получения данных о преподавателе из Sheets: %w", err)
+	// Читаем колонку A (A2, A4, A6, A8, A10)
+	respA, errA := sheetsService.Spreadsheets.Values.Get(spreadsheetID, fmt.Sprintf("%s!%s", teacherSheet, teacherReadRangeA)).Context(ctx).Do()
+	if errA != nil {
+		return nil, fmt.Errorf("ошибка получения данных из Sheets (A): %w", errA)
 	}
 
-	if len(resp.Values) == 0 || len(resp.Values[0]) < 4 {
-		// Даже если данных нет, возвращаем пустую карту, чтобы избежать паники,
-		// но с ошибкой, чтобы инициировать запасной текстовый ответ
-		return map[string]string{
-			"photo": "", "name": "Не указано",
-			"description": "Не указано", "contacts": "Не указано",
-		}, fmt.Errorf("не найдена строка с данными в диапазоне A2:D2 во вкладке Teacher")
+	// Читаем колонку B (B2:B12) для описания
+	respB, errB := sheetsService.Spreadsheets.Values.Get(spreadsheetID, fmt.Sprintf("%s!%s", teacherSheet, teacherReadRangeB)).Context(ctx).Do()
+	if errB != nil {
+		return nil, fmt.Errorf("ошибка получения данных из Sheets (B): %w", errB)
 	}
-
-	row := resp.Values[0]
 
 	info := make(map[string]string)
 
-	// A2: photo (индекс 0)
-	if len(row) > 0 {
-		info["photo"] = row[0].(string)
+	// 1. Чтение данных из столбца A
+
+	// A2 (индекс 0): Name
+	if len(respA.Values) > 0 && len(respA.Values[0]) > 0 {
+		info["name"] = respA.Values[0][0].(string)
+	} else {
+		info["name"] = "Не указано"
 	}
-	// B2: name (индекс 1)
-	if len(row) > 1 {
-		info["name"] = row[1].(string)
+
+	// A4 (индекс 2): Photo URL
+	if len(respA.Values) > 2 && len(respA.Values[2]) > 0 {
+		info["photo"] = respA.Values[2][0].(string)
 	}
-	// C2: description (индекс 2)
-	if len(row) > 2 {
-		info["description"] = row[2].(string)
+
+	// A6 (индекс 4): Audio URL
+	if len(respA.Values) > 4 && len(respA.Values[4]) > 0 {
+		info["audio"] = respA.Values[4][0].(string)
 	}
-	// D2: contacts (индекс 3)
-	if len(row) > 3 {
-		info["contacts"] = row[3].(string)
+
+	// A8 (индекс 6): Video URL
+	if len(respA.Values) > 6 && len(respA.Values[6]) > 0 {
+		info["video"] = respA.Values[6][0].(string)
 	}
+
+	// A10 (индекс 8): Contacts
+	if len(respA.Values) > 8 && len(respA.Values[8]) > 0 {
+		info["contacts"] = respA.Values[8][0].(string)
+	} else {
+		info["contacts"] = "Не указано"
+	}
+
+	// 2. Чтение Описания из столбца B и объединение строк
+	var descriptionLines []string
+	if len(respB.Values) > 0 {
+		// Проходим по всем строкам B2:B12
+		for _, row := range respB.Values {
+			if len(row) > 0 {
+				// Добавляем содержимое ячейки, если оно не пустое
+				descriptionLines = append(descriptionLines, row[0].(string))
+			} else {
+				// Если ячейка пустая, добавляем пустую строку для переноса
+				descriptionLines = append(descriptionLines, "")
+			}
+		}
+	}
+
+	// Объединяем строки, используя '\n' как разделитель
+	info["description"] = strings.Join(descriptionLines, "\n")
 
 	return info, nil
 }
