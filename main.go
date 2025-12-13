@@ -29,7 +29,7 @@ const readRangeH2toK = "H2:K"
 const readRangeA2toF = "A2:F"
 
 // ИСПРАВЛЕННЫЙ ДИАПАЗОН ЧТЕНИЯ для Teacher: читаем только заполненные ячейки А
-const teacherReadRangeA = "A2,A4,A6,A8,A10"
+const teacherReadRangeA = "A2:A10"
 const teacherReadRangeB = "B2:B12" // Диапазон B остается прежним
 
 // --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ДЛЯ ДОСТУПА К API ---
@@ -605,11 +605,11 @@ func getUserStatsFromLeaderboard(userID int64) (UserStats, error) {
 	return stats, nil
 }
 
-// loadTeacherInfo считывает информацию о преподавателе из НОВЫХ ячеек A2,A4,A6,A8,A10 и B2:B12.
+// loadTeacherInfo считывает информацию о преподавателе из новых ячеек
 func loadTeacherInfo() (map[string]string, error) {
 	ctx := context.Background()
 
-	// Читаем колонку A (A2,A4,A6,A8,A10)
+	// Читаем колонку A (A2:A10). API вернет 9 строк (индексы 0-8).
 	respA, errA := sheetsService.Spreadsheets.Values.Get(spreadsheetID, fmt.Sprintf("%s!%s", teacherSheet, teacherReadRangeA)).Context(ctx).Do()
 	if errA != nil {
 		return nil, fmt.Errorf("ошибка получения данных из Sheets (A): %w", errA)
@@ -623,53 +623,53 @@ func loadTeacherInfo() (map[string]string, error) {
 
 	info := make(map[string]string)
 
-	// 1. Чтение данных из столбца A (Используем новые индексы 0, 1, 2, 3, 4)
+	// 1. Чтение данных из столбца A
+
+	// Функция проверки наличия данных в строке:
+	getData := func(rowIndex int) string {
+		if len(respA.Values) > rowIndex && len(respA.Values[rowIndex]) > 0 {
+			if str, ok := respA.Values[rowIndex][0].(string); ok {
+				return str
+			}
+		}
+		return ""
+	}
 
 	// A2 (индекс 0): Name
-	if len(respA.Values) > 0 && len(respA.Values[0]) > 0 {
-		info["name"] = respA.Values[0][0].(string)
+	if name := getData(0); name != "" {
+		info["name"] = name
 	} else {
 		info["name"] = "Не указано"
 	}
 
-	// A4 (индекс 1): Photo URL
-	if len(respA.Values) > 1 && len(respA.Values[1]) > 0 {
-		info["photo"] = respA.Values[1][0].(string)
-	}
+	// A4 (индекс 2): Photo URL
+	info["photo"] = getData(2)
 
-	// A6 (индекс 2): Audio URL
-	if len(respA.Values) > 2 && len(respA.Values[2]) > 0 {
-		info["audio"] = respA.Values[2][0].(string)
-	}
+	// A6 (индекс 4): Audio URL
+	info["audio"] = getData(4)
 
-	// A8 (индекс 3): Video URL
-	if len(respA.Values) > 3 && len(respA.Values[3]) > 0 {
-		info["video"] = respA.Values[3][0].(string)
-	}
+	// A8 (индекс 6): Video URL
+	info["video"] = getData(6)
 
-	// A10 (индекс 4): Contacts
-	if len(respA.Values) > 4 && len(respA.Values[4]) > 0 {
-		info["contacts"] = respA.Values[4][0].(string)
+	// A10 (индекс 8): Contacts
+	if contacts := getData(8); contacts != "" {
+		info["contacts"] = contacts
 	} else {
 		info["contacts"] = "Не указано"
 	}
 
-	// 2. Чтение Описания из столбца B и объединение строк
+	// 2. Чтение Описания из столбца B и объединение строк (логика не менялась)
 	var descriptionLines []string
 	if len(respB.Values) > 0 {
-		// Проходим по всем строкам B2:B12
 		for _, row := range respB.Values {
 			if len(row) > 0 {
-				// Добавляем содержимое ячейки, если оно не пустое
 				descriptionLines = append(descriptionLines, row[0].(string))
 			} else {
-				// Если ячейка пустая, добавляем пустую строку для переноса
 				descriptionLines = append(descriptionLines, "")
 			}
 		}
 	}
 
-	// Объединяем строки, используя '\n' как разделитель
 	info["description"] = strings.Join(descriptionLines, "\n")
 
 	return info, nil
