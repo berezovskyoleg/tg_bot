@@ -18,8 +18,7 @@ import (
 )
 
 // !!! ЗАМЕНИТЕ ЭТОТ ID НА ID ВАШЕЙ ТАБЛИЦЫ !!!
-// Убедитесь, что вы вставляете сюда свой реальный ID таблицы.
-const spreadsheetID = "12d036WzCPyL97CtbiU2Vx2BQtr2JDDpVx9mBwSTmwo8"
+const spreadsheetID = "12d036WzCPyR97CtbiU2Vx2BQtr2JDDpVx9mBwSTmwo8"
 
 const leaderboardSheet = "Leaderboard"
 const teacherSheet = "Teacher"
@@ -28,9 +27,9 @@ const writeRangeHtoK = "H:K"
 const readRangeH2toK = "H2:K"
 const readRangeA2toF = "A2:F"
 
-// ИСПРАВЛЕННЫЙ ДИАПАЗОН ЧТЕНИЯ для Teacher: читаем только заполненные ячейки А
+// ИСПРАВЛЕННЫЙ ДИАПАЗОН ЧТЕНИЯ для Teacher: A2:A10 (включая пустые строки)
 const teacherReadRangeA = "A2:A10"
-const teacherReadRangeB = "B2:B12" // Диапазон B остается прежним
+const teacherReadRangeB = "B2:B12"
 
 // --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ДЛЯ ДОСТУПА К API ---
 var sheetsService *sheets.Service
@@ -38,8 +37,6 @@ var botAPI *tgbotapi.BotAPI
 var leaderboardMutex sync.Mutex
 
 // --- ГЛОБАЛЬНЫЕ СТРУКТУРЫ ДЛЯ ТЕСТОВ ---
-
-// Структура для хранения одного вопроса теста
 type TestQuestion struct {
 	ID            string
 	Question      string
@@ -47,7 +44,6 @@ type TestQuestion struct {
 	CorrectAnswer int
 }
 
-// Структура для агрегации статистики пользователя
 type UserStats struct {
 	Username    string
 	UserID      string
@@ -55,11 +51,9 @@ type UserStats struct {
 	TotalPassed int
 }
 
-// Глобальная переменная для хранения текущего загруженного теста
 var currentTest []TestQuestion
 var currentTestName string
 
-// Глобальная переменная для отслеживания состояния пользователя
 var userState = make(map[int64]int)
 var userScores = make(map[int64]int)
 
@@ -72,7 +66,6 @@ func main() {
 	}
 
 	var err error
-	// ИСПРАВЛЕНО: NewNewBotAPI -> NewBotAPI
 	botAPI, err = tgbotapi.NewBotAPI(botToken)
 	if err != nil {
 		log.Panic(err)
@@ -80,7 +73,7 @@ func main() {
 
 	log.Printf("Авторизация на аккаунте %s", botAPI.Self.UserName)
 
-	// --- ИНИЦИАЛИЗАЦИЯ GOOGLE SHEETS API (ГЛОБАЛЬНО) ---
+	// --- ИНИЦИАЛИЗАЦИЯ GOOGLE SHEETS API ---
 	ctx := context.Background()
 
 	data, err := os.ReadFile("credentials.json")
@@ -99,11 +92,9 @@ func main() {
 		log.Fatalf("Не удалось создать клиент Sheets API: %v", err)
 	}
 	log.Println("Клиент Google Sheets API успешно инициализирован.")
-	// ----------------------------------------
 
 	// --- ЗАПУСК ФОНОВОГО ОБНОВЛЕНИЯ LEADERBOARD ---
 	go startLeaderboardUpdater()
-	// ------------------------------------------------
 
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
@@ -114,16 +105,79 @@ func main() {
 	buttonTests := tgbotapi.NewInlineKeyboardButtonData("Тесты", "start_tests")
 	buttonTeacher := tgbotapi.NewInlineKeyboardButtonData("Преподаватель", "show_teacher")
 
-	// Кнопки в два ряда: [Преподаватель, ЛК], [Тесты]
 	keyboardRow1 := tgbotapi.NewInlineKeyboardRow(buttonTeacher, buttonLK)
 	keyboardRow2 := tgbotapi.NewInlineKeyboardRow(buttonTests)
 	inlineKeyboard := tgbotapi.NewInlineKeyboardMarkup(keyboardRow1, keyboardRow2)
 	// ---------------------------------------
 
-	// Обрабатываем обновления
+	// =======================================================
+	// 🌟 ИНТЕГРИРОВАННАЯ ЛОГИКА ОБРАБОТКИ ОБНОВЛЕНИЙ 🌟
+	// =======================================================
 	for update := range updates {
 
-		// 1. ОБРАБОТКА CALLBACK QUERY (НАЖАТИЕ INLINE-КНОПКИ)
+		// 1. ОБРАБОТКА МЕДИА (ДЛЯ ПОЛУЧЕНИЯ FILE ID)
+		if update.Message != nil {
+			chatID := update.Message.Chat.ID
+			log.Printf("[%s] %s", update.Message.From.UserName, update.Message.Text)
+
+			// --- Получение File ID для Фото ---
+			if len(update.Message.Photo) > 0 {
+				fileID := update.Message.Photo[len(update.Message.Photo)-1].FileID
+				log.Printf("📥 File ID для ФОТО: %s", fileID)
+				botAPI.Send(tgbotapi.NewMessage(chatID, "Ваш File ID для фото: "+fileID))
+				continue
+			}
+
+			// --- Получение File ID для Видео ---
+			if update.Message.Video != nil {
+				fileID := update.Message.Video.FileID
+				log.Printf("📥 File ID для ВИДЕО: %s", fileID)
+				botAPI.Send(tgbotapi.NewMessage(chatID, "Ваш File ID для видео: "+fileID))
+				continue
+			}
+
+			// --- Получение File ID для Аудио ---
+			if update.Message.Audio != nil {
+				fileID := update.Message.Audio.FileID
+				log.Printf("📥 File ID для АУДИО: %s", fileID)
+				botAPI.Send(tgbotapi.NewMessage(chatID, "Ваш File ID для аудио: "+fileID))
+				continue
+			}
+
+			// --- ОБРАБОТКА КОМАНД (Если это не медиа) ---
+			if update.Message.IsCommand() {
+				msg := tgbotapi.NewMessage(chatID, "")
+				switch update.Message.Command() {
+				case "start":
+					msg.Text = "Привет! Я бот на GoLang. Выберите действие."
+					msg.ReplyMarkup = inlineKeyboard
+				case "info":
+					response := fmt.Sprintf(
+						"Ваша информация:\nID: %d\nИмя: %s\nЮзернейм: @%s",
+						update.Message.From.ID, update.Message.From.FirstName, update.Message.From.UserName)
+					msg.Text = response
+				case "tests":
+					msg.Text = "Выберите кнопку 'Тесты', чтобы увидеть список доступных викторин."
+					msg.ReplyMarkup = inlineKeyboard
+				default:
+					msg.Text = "Неизвестная команда."
+				}
+
+				if _, err := botAPI.Send(msg); err != nil {
+					log.Println(err)
+				}
+				continue
+			}
+
+			// --- ЛОГИКА "ЭХО" (для обычного текста) ---
+			msg := tgbotapi.NewMessage(chatID, update.Message.Text)
+			if _, err := botAPI.Send(msg); err != nil {
+				log.Println(err)
+			}
+			continue
+		}
+
+		// 2. ОБРАБОТКА CALLBACK QUERY (НАЖАТИЕ INLINE-КНОПКИ)
 		if update.CallbackQuery != nil {
 			callback := update.CallbackQuery
 			callbackData := callback.Data
@@ -131,6 +185,10 @@ func main() {
 			userID := callback.From.ID
 
 			log.Printf("Получен Callback от [%s]: %s", callback.From.UserName, callbackData)
+
+			// Удаление "часов" в Telegram после нажатия
+			callbackConfig := tgbotapi.NewCallback(callback.ID, "Запрос обработан!")
+			botAPI.Request(callbackConfig)
 
 			// --- ОБРАБОТКА ОТВЕТОВ НА ВОПРОСЫ ---
 			if strings.HasPrefix(callbackData, "answer_") {
@@ -165,7 +223,6 @@ func main() {
 
 				// --- ОБРАБОТКА ВЫБОРА ТЕСТА (нажатие кнопки "Тесты") ---
 			} else if callbackData == "start_tests" {
-				// 🟢 БЛОК: Показ списка доступных тестов
 
 				testNames, err := getTestNames()
 				if err != nil {
@@ -192,23 +249,20 @@ func main() {
 					botAPI.Send(editMsg)
 				}
 
-				// --- ОБРАБОТКА ВЫБОРА КОНКРЕТНОГО ТЕСТА (select_ИмяВкладки) ---
+				// --- ОБРАБОТКА ВЫБОРА КОНКРЕТНОГО ТЕСТА ---
 			} else if strings.HasPrefix(callbackData, "select_") {
 				testName := strings.TrimPrefix(callbackData, "select_")
-				log.Printf("Пользователь [%s] выбрал тест: %s", callback.From.UserName, testName)
 
-				// 1. Загрузка выбранного теста
 				var errLoad error
 				currentTest, errLoad = loadTestFromSheets(sheetsService, spreadsheetID, testName)
 				if errLoad != nil {
 					log.Printf("Ошибка при загрузке теста %s: %v", testName, errLoad)
-					text := fmt.Sprintf("Ошибка загрузки вопросов из вкладки %s. Убедитесь, что данные начинаются с A2.", testName)
+					text := fmt.Sprintf("Ошибка загрузки вопросов из вкладки %s.", testName)
 					botAPI.Send(tgbotapi.NewMessage(chatID, text))
 					return
 				}
 				currentTestName = testName
 
-				// 2. Инициализация и старт теста
 				userState[userID] = 0
 				userScores[userID] = 0
 
@@ -222,7 +276,7 @@ func main() {
 
 				sendQuestion(botAPI, sheetsService, chatID, userID, userName)
 
-				// --- ОБРАБОТКА ЛИЧНОГО КАБИНЕТА (ЧТЕНИЕ ИЗ LEADERBOARD) ---
+				// --- ОБРАБОТКА ЛИЧНОГО КАБИНЕТА ---
 			} else if callbackData == "show_lk" {
 				stats, err := getUserStatsFromLeaderboard(userID)
 				if err != nil {
@@ -263,23 +317,21 @@ func main() {
 
 				botAPI.Send(msg)
 
-				// --- БЛОК: ИНФОРМАЦИЯ О ПРЕПОДАВАТЕЛЕ ---
+				// --- БЛОК: ИНФОРМАЦИЯ О ПРЕПОДАВАТЕЛЕ (С ЛОГИКОЙ FILE ID/URL) ---
 			} else if callbackData == "show_teacher" {
 
 				teacherInfo, err := loadTeacherInfo()
 				if err != nil {
-					// Логирование ошибки для отладки
 					log.Println("Ошибка загрузки данных преподавателя:", err)
 					backButton := tgbotapi.NewInlineKeyboardButtonData("⏪ Назад", "show_start_menu")
 					keyboard := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(backButton))
 
-					editMsg := tgbotapi.NewEditMessageText(chatID, callback.Message.MessageID, "⚠️ Не удалось загрузить информацию о преподавателе. Проверьте вкладку 'Teacher' и новый диапазон ячеек.")
+					editMsg := tgbotapi.NewEditMessageText(chatID, callback.Message.MessageID, "⚠️ Не удалось загрузить информацию о преподавателе.")
 					editMsg.ReplyMarkup = &keyboard
 					botAPI.Send(editMsg)
 					return
 				}
 
-				// 1. Формируем ТЕКСТ (Имя + Описание + Контакты)
 				response := fmt.Sprintf(
 					"🧑‍🏫 *%s*\n\n"+
 						"%s\n\n"+
@@ -300,8 +352,20 @@ func main() {
 
 				// --- 2. Отправка Фото + Текст (в подписи) ---
 				photoSent := false
-				if photoURL, ok := teacherInfo["photo"]; ok && photoURL != "" {
-					photoMsg := tgbotapi.NewPhoto(chatID, tgbotapi.FileURL(photoURL))
+				if photoIDOrURL, ok := teacherInfo["photo"]; ok && photoIDOrURL != "" {
+
+					// ИСПРАВЛЕНО: Вместо var media tgbotapi.Request; используем конкретный тип
+					var photoMsg tgbotapi.PhotoConfig
+
+					if strings.HasPrefix(photoIDOrURL, "http") || strings.HasPrefix(photoIDOrURL, "https") {
+						// Это URL
+						photoMsg = tgbotapi.NewPhoto(chatID, tgbotapi.FileURL(photoIDOrURL))
+					} else {
+						// Это File ID
+						photoMsg = tgbotapi.NewPhoto(chatID, tgbotapi.FileID(photoIDOrURL))
+					}
+
+					// photoMsg := media.(tgbotapi.PhotoConfig) // <-- Эту строку удаляем, она больше не нужна
 					photoMsg.Caption = response
 					photoMsg.ParseMode = tgbotapi.ModeMarkdown
 
@@ -309,10 +373,9 @@ func main() {
 						photoSent = true
 						lastMsgID = sentMsg.MessageID
 					} else {
-						log.Printf("Не удалось отправить фото преподавателя (URL: %s): %v. Отправка только текста.", photoURL, err)
+						log.Printf("Не удалось отправить фото преподавателя (ID/URL: %s): %v. Отправка только текста.", photoIDOrURL, err)
 					}
 				}
-
 				// Если фото не было отправлено, отправляем только текст (новое сообщение)
 				if !photoSent {
 					newMsg := tgbotapi.NewMessage(chatID, response)
@@ -324,24 +387,36 @@ func main() {
 				}
 
 				// --- 3. Отправка Видео ---
-				if videoURL, ok := teacherInfo["video"]; ok && videoURL != "" {
-					videoMsg := tgbotapi.NewVideo(chatID, tgbotapi.FileURL(videoURL))
+				if videoIDOrURL, ok := teacherInfo["video"]; ok && videoIDOrURL != "" {
+					// ИСПРАВЛЕНО: Вместо var media tgbotapi.Request; используем конкретный тип
+					var videoMsg tgbotapi.VideoConfig
 
+					if strings.HasPrefix(videoIDOrURL, "http") || strings.HasPrefix(videoIDOrURL, "https") {
+						videoMsg = tgbotapi.NewVideo(chatID, tgbotapi.FileURL(videoIDOrURL))
+					} else {
+						videoMsg = tgbotapi.NewVideo(chatID, tgbotapi.FileID(videoIDOrURL))
+					}
 					if sentMsg, err := botAPI.Send(videoMsg); err == nil {
 						lastMsgID = sentMsg.MessageID
 					} else {
-						log.Printf("Не удалось отправить видео (URL: %s): %v.", videoURL, err)
+						log.Printf("Не удалось отправить видео (ID/URL: %s): %v.", videoIDOrURL, err)
 					}
 				}
 
 				// --- 4. Отправка Аудио ---
-				if audioURL, ok := teacherInfo["audio"]; ok && audioURL != "" {
-					audioMsg := tgbotapi.NewAudio(chatID, tgbotapi.FileURL(audioURL))
+				if audioIDOrURL, ok := teacherInfo["audio"]; ok && audioIDOrURL != "" {
+					// ИСПРАВЛЕНО: Вместо var media tgbotapi.Request; используем конкретный тип
+					var audioMsg tgbotapi.AudioConfig
 
+					if strings.HasPrefix(audioIDOrURL, "http") || strings.HasPrefix(audioIDOrURL, "https") {
+						audioMsg = tgbotapi.NewAudio(chatID, tgbotapi.FileURL(audioIDOrURL))
+					} else {
+						audioMsg = tgbotapi.NewAudio(chatID, tgbotapi.FileID(audioIDOrURL))
+					}
 					if sentMsg, err := botAPI.Send(audioMsg); err == nil {
 						lastMsgID = sentMsg.MessageID
 					} else {
-						log.Printf("Не удалось отправить аудио (URL: %s): %v.", audioURL, err)
+						log.Printf("Не удалось отправить аудио (ID/URL: %s): %v.", audioIDOrURL, err)
 					}
 				}
 
@@ -365,53 +440,12 @@ func main() {
 					botAPI.Send(newMsg)
 				}
 			}
-
-			callbackConfig := tgbotapi.NewCallback(callback.ID, "Запрос обработан!")
-			botAPI.Request(callbackConfig)
-
-			continue
-		}
-
-		// 2. ОБРАБОТКА ОБЫЧНЫХ СООБЩЕНИЙ (ТЕКСТ/КОМАНДЫ)
-		if update.Message != nil {
-			log.Printf("[%s] %s", update.Message.From.UserName, update.Message.Text)
-
-			if update.Message.IsCommand() {
-				msg := tgbotapi.NewMessage(update.Message.Chat.ID, "")
-				switch update.Message.Command() {
-				case "start":
-					msg.Text = "Привет! Я бот на GoLang. Выберите действие."
-					msg.ReplyMarkup = inlineKeyboard
-				case "info":
-					response := fmt.Sprintf(
-						"Ваша информация:\nID: %d\nИмя: %s\nЮзернейм: @%s",
-						update.Message.From.ID, update.Message.From.FirstName, update.Message.From.UserName)
-					msg.Text = response
-				case "tests":
-					msg.Text = "Выберите кнопку 'Тесты', чтобы увидеть список доступных викторин."
-					msg.ReplyMarkup = inlineKeyboard
-				default:
-					msg.Text = "Неизвестная команда."
-				}
-
-				if _, err := botAPI.Send(msg); err != nil {
-					log.Println(err)
-				}
-				continue
-			}
-
-			// 3. ЛОГИКА "ЭХО"
-			msg := tgbotapi.NewMessage(update.Message.Chat.ID, update.Message.Text)
-			if _, err := botAPI.Send(msg); err != nil {
-				log.Println(err)
-			}
 		}
 	}
 }
 
 // --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 
-// startLeaderboardUpdater запускает фоновый процесс обновления Leaderboard каждые 5 минут
 func startLeaderboardUpdater() {
 	if err := updateLeaderboard(); err != nil {
 		log.Printf("Ошибка при стартовом обновлении Leaderboard: %v", err)
@@ -431,7 +465,6 @@ func startLeaderboardUpdater() {
 	}
 }
 
-// updateLeaderboard агрегирует лучший результат каждого пользователя по всем тестам и записывает в Leaderboard.
 func updateLeaderboard() error {
 	leaderboardMutex.Lock()
 	defer leaderboardMutex.Unlock()
@@ -446,17 +479,14 @@ func updateLeaderboard() error {
 	userBestScores := make(map[string]map[string]int)
 	userNames := make(map[string]string)
 
-	// 2. Проходим по всем вкладкам, ища вкладки с тестами
 	for _, sheet := range allSheets.Sheets {
 		sheetTitle := sheet.Properties.Title
 		sheetTitleLower := strings.ToLower(sheetTitle)
 
-		// Фильтруем служебные вкладки, включая Teacher
 		if strings.Contains(sheetTitleLower, "leaderboard") || strings.Contains(sheetTitleLower, "results") || sheetTitle == teacherSheet {
 			continue
 		}
 
-		// Диапазон: H2:K (UserID, Username, Score, Timestamp)
 		readRange := fmt.Sprintf("%s!%s", sheetTitle, readRangeH2toK)
 
 		resp, err := sheetsService.Spreadsheets.Values.Get(spreadsheetID, readRange).Context(ctx).Do()
@@ -465,7 +495,6 @@ func updateLeaderboard() error {
 			continue
 		}
 
-		// 3. Собираем лучший результат каждого пользователя в этом тесте
 		testName := sheetTitle
 
 		for _, row := range resp.Values {
@@ -473,7 +502,6 @@ func updateLeaderboard() error {
 				continue
 			}
 
-			// Колонки: H (индекс 0), I (индекс 1), J (индекс 2)
 			userIDStr := row[0].(string)
 			username := row[1].(string)
 			scoreStr := row[2].(string)
@@ -499,7 +527,6 @@ func updateLeaderboard() error {
 		}
 	}
 
-	// 4. Агрегация: Суммируем баллы и считаем уникальные тесты
 	var aggregatedStats []UserStats
 	for userIDStr, scoresByTest := range userBestScores {
 		totalScore := 0
@@ -518,7 +545,6 @@ func updateLeaderboard() error {
 		})
 	}
 
-	// 5. Ранжирование по TotalScore (по убыванию)
 	sort.Slice(aggregatedStats, func(i, j int) bool {
 		if aggregatedStats[i].TotalScore != aggregatedStats[j].TotalScore {
 			return aggregatedStats[i].TotalScore > aggregatedStats[j].TotalScore
@@ -529,7 +555,6 @@ func updateLeaderboard() error {
 		return aggregatedStats[i].Username < aggregatedStats[j].Username
 	})
 
-	// 6. Форматирование для записи
 	var values [][]interface{}
 	for _, stat := range aggregatedStats {
 		values = append(values, []interface{}{
@@ -540,7 +565,6 @@ func updateLeaderboard() error {
 		})
 	}
 
-	// 7. Очистка и запись в Leaderboard
 	clearRange := fmt.Sprintf("%s!%s", leaderboardSheet, leaderboardRange)
 	clearRequest := &sheets.ClearValuesRequest{}
 	sheetsService.Spreadsheets.Values.Clear(spreadsheetID, clearRange, clearRequest).Context(ctx).Do()
@@ -564,14 +588,12 @@ func updateLeaderboard() error {
 	return nil
 }
 
-// getUserStatsFromLeaderboard считывает статистику пользователя из Leaderboard.
 func getUserStatsFromLeaderboard(userID int64) (UserStats, error) {
 	leaderboardMutex.Lock()
 	defer leaderboardMutex.Unlock()
 	ctx := context.Background()
 	stats := UserStats{TotalPassed: 0, TotalScore: 0}
 
-	// Читаем Leaderboard (A: UserID, B: Username, C: Score, D: Passed)
 	readRange := fmt.Sprintf("%s!%s", leaderboardSheet, leaderboardRange)
 	resp, err := sheetsService.Spreadsheets.Values.Get(spreadsheetID, readRange).Context(ctx).Do()
 	if err != nil {
@@ -584,17 +606,14 @@ func getUserStatsFromLeaderboard(userID int64) (UserStats, error) {
 		return stats, nil
 	}
 
-	// Ищем пользователя по UserID в колонке A (индекс 0)
 	for _, row := range resp.Values {
 		if len(row) >= 4 && row[0].(string) == userIDStr {
 			stats.UserID = row[0].(string)
 			stats.Username = row[1].(string)
 
-			// Score is in C (index 2)
 			if score, err := strconv.Atoi(row[2].(string)); err == nil {
 				stats.TotalScore = score
 			}
-			// Passed is in D (index 3)
 			if passed, err := strconv.Atoi(row[3].(string)); err == nil {
 				stats.TotalPassed = passed
 			}
@@ -605,7 +624,6 @@ func getUserStatsFromLeaderboard(userID int64) (UserStats, error) {
 	return stats, nil
 }
 
-// loadTeacherInfo считывает информацию о преподавателе из новых ячеек
 func loadTeacherInfo() (map[string]string, error) {
 	ctx := context.Background()
 
@@ -622,8 +640,6 @@ func loadTeacherInfo() (map[string]string, error) {
 	}
 
 	info := make(map[string]string)
-
-	// 1. Чтение данных из столбца A
 
 	// Функция проверки наличия данных в строке:
 	getData := func(rowIndex int) string {
@@ -642,13 +658,13 @@ func loadTeacherInfo() (map[string]string, error) {
 		info["name"] = "Не указано"
 	}
 
-	// A4 (индекс 2): Photo URL
+	// A4 (индекс 2): Photo URL/ID
 	info["photo"] = getData(2)
 
-	// A6 (индекс 4): Audio URL
+	// A6 (индекс 4): Audio URL/ID
 	info["audio"] = getData(4)
 
-	// A8 (индекс 6): Video URL
+	// A8 (индекс 6): Video URL/ID
 	info["video"] = getData(6)
 
 	// A10 (индекс 8): Contacts
@@ -658,7 +674,7 @@ func loadTeacherInfo() (map[string]string, error) {
 		info["contacts"] = "Не указано"
 	}
 
-	// 2. Чтение Описания из столбца B и объединение строк (логика не менялась)
+	// Чтение Описания из столбца B и объединение строк
 	var descriptionLines []string
 	if len(respB.Values) > 0 {
 		for _, row := range respB.Values {
@@ -675,9 +691,7 @@ func loadTeacherInfo() (map[string]string, error) {
 	return info, nil
 }
 
-// loadTestFromSheets считывает вопросы и ответы из указанной вкладки (sheetName)
 func loadTestFromSheets(service *sheets.Service, spreadsheetID string, sheetName string) ([]TestQuestion, error) {
-	// Читаем вопросы из диапазона A2:F
 	readRange := fmt.Sprintf("%s!%s", sheetName, readRangeA2toF)
 	ctx := context.Background()
 
@@ -719,7 +733,6 @@ func loadTestFromSheets(service *sheets.Service, spreadsheetID string, sheetName
 	return testData, nil
 }
 
-// getTestNames извлекает названия всех вкладок (листов) из таблицы.
 func getTestNames() ([]string, error) {
 	ctx := context.Background()
 
@@ -734,7 +747,7 @@ func getTestNames() ([]string, error) {
 
 		titleLower := strings.ToLower(title)
 
-		// 🚨 ФИЛЬТР: Исключаем служебные вкладки: Leaderboard, Results и Teacher.
+		// ФИЛЬТР: Исключаем служебные вкладки
 		if strings.Contains(titleLower, "leaderboard") || strings.Contains(titleLower, "results") || title == teacherSheet {
 			continue
 		}
@@ -744,7 +757,6 @@ func getTestNames() ([]string, error) {
 	return testTitles, nil
 }
 
-// sendQuestion отправляет текущий вопрос пользователю
 func sendQuestion(bot *tgbotapi.BotAPI, service *sheets.Service, chatID int64, userID int64, username string) {
 	qIndex := userState[userID]
 
@@ -764,24 +776,19 @@ func sendQuestion(bot *tgbotapi.BotAPI, service *sheets.Service, chatID int64, u
 			finalText += "\nРезультат сохранен и обновлен."
 		}
 
-		// Запускаем асинхронное обновление Leaderboard
 		go func() {
 			if err := updateLeaderboard(); err != nil {
 				log.Printf("Ошибка при обновлении Leaderboard после теста: %v", err)
 			}
 		}()
 
-		// --- КЛАВИАТУРА ПОСЛЕ ТЕСТА ---
 		buttonLK := tgbotapi.NewInlineKeyboardButtonData("ЛК", "show_lk")
 		buttonTests := tgbotapi.NewInlineKeyboardButtonData("Тесты", "start_tests")
-
-		// Кнопка "Назад" ведет в главное меню (show_start_menu)
 		backToMain := tgbotapi.NewInlineKeyboardButtonData("⏪ Назад", "show_start_menu")
 
 		keyboardRow1 := tgbotapi.NewInlineKeyboardRow(buttonTests, buttonLK)
 		keyboardRow2 := tgbotapi.NewInlineKeyboardRow(backToMain)
 		postTestKeyboard := tgbotapi.NewInlineKeyboardMarkup(keyboardRow1, keyboardRow2)
-		// ------------------------------------
 
 		finalMsg := tgbotapi.NewMessage(chatID, finalText)
 		finalMsg.ReplyMarkup = postTestKeyboard
@@ -809,19 +816,16 @@ func sendQuestion(bot *tgbotapi.BotAPI, service *sheets.Service, chatID int64, u
 	}
 }
 
-// writeResultToSheets ищет предыдущий лучший результат пользователя в той же вкладке и обновляет его.
 func writeResultToSheets(service *sheets.Service, userID int64, username string, currentScore int, totalQuestions int, testName string) error {
 	ctx := context.Background()
 
 	resultSheetName := testName
-	// Диапазон чтения: H2:K
 	readRange := fmt.Sprintf("%s!%s", resultSheetName, readRangeH2toK)
-	// Диапазон записи: H:K
 	writeRange := fmt.Sprintf("%s!%s", resultSheetName, writeRangeHtoK)
 
 	resp, err := service.Spreadsheets.Values.Get(spreadsheetID, readRange).Context(ctx).Do()
 	if err != nil {
-		log.Printf("Предупреждение: Не удалось прочитать результаты из %s. Будет предпринята попытка записи новой строки. Ошибка: %v", resultSheetName, err)
+		log.Printf("Предупреждение: Не удалось прочитать результаты из %s. Ошибка: %v", resultSheetName, err)
 	}
 
 	var updateCellRange string
